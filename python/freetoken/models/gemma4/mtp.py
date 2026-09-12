@@ -210,6 +210,10 @@ class GemmaMTPDrafter:
             k = self._rope(k, positions, i)
             q = _rms(q, b.q_norm, self.eps)
             q = self._rope(q, positions, i)
+            group = num_q // num_kv
+            if group > 1:
+                k = k.repeat_interleave(group, dim=1)
+                v = v.repeat_interleave(group, dim=1)
             scores = torch.einsum("thd,shd->hts", q, k) / b.head_dim**0.5
             if self.attention_pattern[i] and self.sliding_window:
                 d = positions[:, None] - positions[None, :]
@@ -217,7 +221,6 @@ class GemmaMTPDrafter:
             else:
                 scores = scores.masked_fill(positions[None, :] > positions[:, None], -torch.inf)
             probs = scores.softmax(-1)
-            v = v.repeat_interleave(num_q // num_kv, 1)
             attn = torch.einsum("hts,shd->thd", probs, v).reshape_as(h)
             h = _rms(_linear(attn, b.o), b.post_attn_norm, self.eps)
             x = residual + h
