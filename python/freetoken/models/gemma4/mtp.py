@@ -221,7 +221,7 @@ class GemmaMTPDrafter:
             else:
                 scores = scores.masked_fill(positions[None, :] > positions[:, None], -torch.inf)
             probs = scores.softmax(-1)
-            attn = torch.einsum("hts,shd->thd", probs, v).reshape_as(h)
+            attn = torch.einsum("hts,shd->thd", probs, v).flatten(-2)
             h = _rms(_linear(attn, b.o), b.post_attn_norm, self.eps)
             x = residual + h
             h = _rms(x, b.ff_norm, self.eps)
