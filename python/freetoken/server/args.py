@@ -297,6 +297,13 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--speculative-mtp",
+        action="store_true",
+        default=ServerArgs.speculative_mtp,
+        help="Enable the experimental single-token MTP transaction (requires a drafter adapter).",
+    )
+
+    parser.add_argument(
         "--memory-ratio",
         type=float,
         default=ServerArgs.memory_ratio,

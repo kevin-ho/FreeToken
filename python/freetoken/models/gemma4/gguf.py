@@ -12,6 +12,7 @@ through the native-Q4_0 offload-cache path.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Iterator
 
 import torch
@@ -26,6 +27,46 @@ from freetoken.models.gguf.dequant import GGML_Q4_0, GGML_Q6_K, dequantize, row_
 
 if TYPE_CHECKING:
     from freetoken.models.gguf.config import GgufConfigShim
+
+
+@dataclass(frozen=True)
+class GemmaMTPGGUFMetadata:
+    """Observed MTP inventory fields; absent fields remain ``None``.
+
+    This is inventory metadata, not a claim that the tensors form an executable drafter.
+    """
+
+    token_embd: tuple[str, ...] = ()
+    nextn_pre_projection: tuple[str, ...] = ()
+    nextn_post_projection: tuple[str, ...] = ()
+    block_groups: tuple[str, ...] = ()
+    shared_kv: tuple[str, ...] = ()
+
+
+def mtp_gguf_metadata(names: Iterator[str], metadata: dict) -> GemmaMTPGGUFMetadata:
+    """Collect only the frozen checkpoint groups, without reading tensor payloads."""
+    names = tuple(sorted(names))
+    return GemmaMTPGGUFMetadata(
+        token_embd=tuple(n for n in names if n == "token_embd.weight"),
+        nextn_pre_projection=tuple(
+            n for n in names if n.startswith("nextn.pre_projection")
+        ),
+        nextn_post_projection=tuple(
+            n for n in names if n.startswith("nextn.post_projection")
+        ),
+        block_groups=tuple(
+            sorted(
+                {
+                    n.split(".", 2)[0] + "." + n.split(".", 2)[1]
+                    for n in names
+                    if n.startswith("blk.")
+                }
+            )
+        ),
+        shared_kv=tuple(
+            sorted(k for k in metadata if k.endswith("attention.head_count_kv"))
+        ),
+    )
 
 
 def _full_rotary_dim(shim: "GgufConfigShim", full_head_dim: int) -> int:
