@@ -91,6 +91,25 @@ def test_k1_abort_releases_prepared_batch_once():
     assert events == ["draft", "abort"]
 
 
+def test_k1_commit_failure_aborts_prepared_batch():
+    batch = object()
+    events: list[str] = []
+
+    def abort(value):
+        events.append("abort")
+        assert value is batch
+
+    def commit(*_):
+        events.append("commit")
+        raise RuntimeError("commit failed")
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        run_k1_transaction(
+            batch, FakeDrafter(1, events), lambda _: _logits(1), commit, abort
+        )
+    assert events == ["draft", "commit", "abort"]
+
+
 def test_k1_rejects_wider_drafter_before_verify():
     events: list[str] = []
     released: list[object] = []

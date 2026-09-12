@@ -42,8 +42,11 @@ def run_k1_transaction(
     ``batch`` must already have gone through the scheduler's ordinary allocation and
     preparation.  The drafter runs before target verification.  This milestone is greedy
     only: a proposal is accepted when it equals the target's first prediction; otherwise
-    the target token is the bonus token.  The caller's commit/abort callbacks retain page
-    ownership, so this function cannot create a second cache owner.
+    the target token is the bonus token.  ``commit`` is called exactly once only after
+    successful verification; ``abort`` is called at most once for any exception from
+    drafting, verification, or commit and must release the prepared batch idempotently.
+    The callbacks retain page ownership, so this function cannot create a second cache
+    owner.
     """
     try:
         proposal = drafter.draft_into_batch(batch)

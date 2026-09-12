@@ -1,12 +1,15 @@
 from .attention import Gemma4Attention
 from .config import parse_config
 from .gguf import (
+    GemmaMTPGGUFMetadata,
     dummy_q4_0_expert_sources,
     iter_gguf_weights,
     load_q4_0_expert_sources,
+    mtp_gguf_metadata,
     parse_gguf_config,
 )
 from .model import Gemma4ForCausalLM
+from .mtp import GemmaMTPDrafter
 from .moe import Gemma4Router
 from .vision import Gemma4MultimodalEmbedder, Gemma4VisionModel
 from .weight import (
@@ -22,6 +25,9 @@ __all__ = [
     "Gemma4MultimodalEmbedder",
     "Gemma4Router",
     "Gemma4VisionModel",
+    "GemmaMTPDrafter",
+    "GemmaMTPGGUFMetadata",
+    "mtp_gguf_metadata",
     "parse_config",
     "iter_weights",
     "iter_weights_parallel",
