@@ -72,6 +72,7 @@ def _write_tiny_gguf(path: Path) -> None:
         [
             string("general.architecture") + struct.pack("<I", 8) + string("synthetic"),
             string("model.mtp.enabled") + struct.pack("<I", 7) + b"\x01",
+            string("model.labels") + struct.pack("<IIQ", 9, 8, 2) + string("first") + string("second"),
         ]
     )
     tensors = [("z.weight", (4, 4)), ("a.weight", (4,))]
@@ -83,7 +84,7 @@ def _write_tiny_gguf(path: Path) -> None:
         tensor_infos.append(string(name) + struct.pack("<I", len(shape)) + b"".join(struct.pack("<Q", dim) for dim in shape) + struct.pack("<IQ", 0, offset))
         payloads.append(payload)
         offset += len(payload)
-    header = struct.pack("<4sIQQ", b"GGUF", 3, len(tensors), 2) + metadata + b"".join(tensor_infos)
+    header = struct.pack("<4sIQQ", b"GGUF", 3, len(tensors), 3) + metadata + b"".join(tensor_infos)
     data_start = (len(header) + 31) // 32 * 32
     path.write_bytes(header + b"\0" * (data_start - len(header)) + b"".join(payloads))
 
@@ -95,7 +96,11 @@ def test_gguf_report_keeps_all_metadata_and_sorts_tensors(tmp_path, probe):
 
     report = probe.inventory(str(path))
 
-    assert report["metadata"]["general.architecture"] == "synthetic"
+    assert report["metadata"] == {
+        "general.architecture": "synthetic",
+        "model.mtp.enabled": True,
+        "model.labels": ["first", "second"],
+    }
     assert report["flagged_metadata_keys"] == ["model.mtp.enabled"]
     assert [tensor["name"] for tensor in report["tensors"]] == ["a.weight", "z.weight"]
     assert report["prefix_groups"] == {"a": ["a.weight"], "z": ["z.weight"]}
