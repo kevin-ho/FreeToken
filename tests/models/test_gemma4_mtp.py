@@ -5,12 +5,14 @@ from freetoken.models.gemma4 import (
     GemmaMTPGGUFMetadata,
     mtp_gguf_metadata,
 )
+from freetoken.models.gemma4.mtp import _Block
 
 
 import json
 import os
 
 import pytest
+import torch
 
 
 def test_synthetic_gguf_mtp_inventory_groups_are_frozen():
@@ -68,6 +70,25 @@ def test_real_gemma_mtp_checkpoint_shape_probe_skips_when_absent():
     assert tuple(drafter.pre_projection.shape) == (1024, 5632)
     assert tuple(drafter.post_projection.shape) == (2816, 1024)
     assert tuple(drafter.embedding.shape) == (262144, 1024)
+
+
+def test_fake_input_forward_uses_caller_target_vocab_head():
+    drafter = GemmaMTPDrafter()
+    drafter.pre_projection = torch.zeros(1024, 5632)
+    drafter.post_projection = torch.zeros(2816, 1024)
+    ones = torch.ones(2816)
+    zero = torch.zeros(2816, 2816)
+    q = torch.zeros(2816, 2816)
+    k = torch.zeros(256, 2816)
+    block = _Block(ones, torch.ones(128), torch.ones(128), ones, ones, q, k, k, zero,
+                   zero, zero, zero)
+    drafter.blocks = [block, block, block, block]
+    hidden = torch.zeros(1, 2816)
+    embedding = torch.zeros(1, 2816)
+    target_head = torch.nn.Linear(2816, 17, bias=False)
+    logits, probabilities = drafter.draft_step(hidden, embedding, target_head)
+    assert logits.shape == (1, 17)
+    assert probabilities is None
 
 
 def test_speculative_mtp_is_off_by_default_and_parsed_from_server_args(tmp_path):
