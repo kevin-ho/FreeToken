@@ -69,13 +69,29 @@ def test_real_gemma_mtp_checkpoint_shape_probe_skips_when_absent():
     drafter = GemmaMTPDrafter.from_gguf(path)
     assert tuple(drafter.pre_projection.shape) == (1024, 5632)
     assert tuple(drafter.post_projection.shape) == (2816, 1024)
-    assert tuple(drafter.embedding.shape) == (262144, 1024)
+    assert tuple(drafter.embedding.shape) == (262144, 2816)
+
+
+def test_mtp_final_norm_precedes_post_projection():
+    drafter = GemmaMTPDrafter()
+    drafter.pre_projection = torch.zeros(1024, 5632)
+    drafter.pre_projection[:, :1024] = torch.eye(1024)
+    drafter.post_projection = torch.zeros(2816, 1024)
+    drafter.post_projection[:1024] = torch.eye(1024)
+    drafter.output_norm = torch.full((2816,), 2.0)
+    drafter.blocks = []
+    hidden = torch.ones(1, 2816)
+    result = drafter._run(hidden, torch.zeros(1, 2816), torch.zeros(1, dtype=torch.long))
+    torch.testing.assert_close(result[:, :1024], torch.full((1, 1024), 2.0))
+    assert torch.count_nonzero(result[:, 1024:]) == 0
 
 
 def test_fake_input_forward_uses_caller_target_vocab_head():
     drafter = GemmaMTPDrafter()
     drafter.pre_projection = torch.zeros(1024, 5632)
     drafter.post_projection = torch.zeros(2816, 1024)
+    drafter.output_norm = torch.ones(2816)
+    drafter.embedding = torch.zeros(32, 2816)
     ones = torch.ones(2816)
     zero = torch.zeros(2816, 2816)
     q = torch.zeros(2816, 2816)
@@ -86,7 +102,7 @@ def test_fake_input_forward_uses_caller_target_vocab_head():
     hidden = torch.zeros(1, 2816)
     embedding = torch.zeros(1, 2816)
     target_head = torch.nn.Linear(2816, 17, bias=False)
-    logits, probabilities = drafter.draft_step(hidden, embedding, target_head)
+    logits, probabilities = drafter.draft_step(hidden, torch.tensor([0]), target_head)
     assert logits.shape == (1, 17)
     assert probabilities is None
 

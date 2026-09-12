@@ -31,6 +31,7 @@ class _Block:
     down: torch.Tensor
     post_ff_norm: torch.Tensor | None = None
     output_scale: torch.Tensor | None = None
+    head_dim: int = 128
 
 
 def _rms(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
@@ -66,20 +67,25 @@ class GemmaMTPDrafter:
 
     ``from_gguf`` loads ``nextn.pre_projection.weight`` [1024, 5632],
     ``nextn.post_projection.weight`` [2816, 1024], the drafter embedding, and
-    ``nextn.blk.0`` through ``nextn.blk.3``.  ``draft_step`` accepts either explicit
-    tensors or a batch-like object carrying ``hidden_state``, ``last_token_embedding``
-    and ``target_lm_head`` attributes.  The latter is a convenience only; no scheduler
-    state is inspected or modified.
+    ``nextn.blk.0`` through ``nextn.blk.3``. ``draft_step`` accepts a target hidden
+    state, a last-token ID for lookup in the drafter embedding, and a target LM head.
+    ``draft_into_batch`` accepts a batch-like object carrying ``hidden_state``,
+    ``last_token_id`` and ``target_lm_head`` attributes. The latter is a convenience
+    only; no scheduler state is inspected or modified.
     """
 
     def __init__(self, draft_step: Callable[..., tuple[Any, Any | None]] | None = None):
         self._draft_step = draft_step
         self.pre_projection = self.post_projection = self.embedding = None
+        self.output_norm = None
         self.blocks: list[_Block] = []
         self.eps = 1e-6
         self.head_dim = 128
         self.num_q_heads = 22
         self.num_kv_heads = 2
+        self.rope_freqs = None
+        self.rope_base = 10000.0
+        self.swa_rope_base = 10000.0
         self.sliding_window = None
         self.target_lm_head = None
 
@@ -90,21 +96,33 @@ class GemmaMTPDrafter:
         root_weights = _tensor_map(model_path, "")
         self.pre_projection = _get(weights, "pre_projection.weight")
         self.post_projection = _get(weights, "post_projection.weight")
+        self.output_norm = _get(root_weights, "output_norm.weight")
         # The drafter table follows the GGUF convention and is named at the root;
         # nextn.* owns the projections and blocks.
         self.embedding = _get(root_weights, "token_embd.weight")
+        self.rope_freqs = root_weights.get("rope_freqs.weight")
+        from freetoken.models.gguf.reader import load_gguf_metadata
+        metadata = load_gguf_metadata(model_path)
+        self.rope_base = float(metadata.get("gemma4.rope.freq_base", self.rope_base))
+        self.swa_rope_base = float(metadata.get("gemma4.rope.freq_base_swa", self.rope_base))
+        self.sliding_window = int(metadata.get("gemma4.attention.sliding_window", 0)) or None
         if tuple(self.pre_projection.shape) != (1024, 5632):
             raise ValueError(f"unexpected nextn pre_projection shape {tuple(self.pre_projection.shape)}")
         if tuple(self.post_projection.shape) != (2816, 1024):
             raise ValueError(f"unexpected nextn post_projection shape {tuple(self.post_projection.shape)}")
-        if self.embedding.ndim != 2 or self.embedding.shape[1] != 1024:
+        if self.embedding.ndim != 2 or self.embedding.shape[1] != 2816:
             raise ValueError(f"unexpected nextn token_embd shape {tuple(self.embedding.shape)}")
+        if self.output_norm.ndim != 1 or self.output_norm.shape[0] != self.pre_projection.shape[0]:
+            raise ValueError(f"unexpected nextn output_norm shape {tuple(self.output_norm.shape)}")
         if "output.weight" in root_weights:
             raise ValueError("Gemma nextn must not contain output.weight")
         if device is not None:
             self.pre_projection = self.pre_projection.to(device)
             self.post_projection = self.post_projection.to(device)
+            self.output_norm = self.output_norm.to(device)
             self.embedding = self.embedding.to(device)
+            if self.rope_freqs is not None:
+                self.rope_freqs = self.rope_freqs.to(device)
         # Metadata is not repeated in every tensor.  These are the Gemma4 MTP geometry;
         # tensor dimensions below are checked against it while loading each block.
         for layer in range(4):
@@ -118,19 +136,26 @@ class GemmaMTPDrafter:
                 g("ffn_gate.weight"), g("ffn_up.weight"), g("ffn_down.weight"),
                 post_ff_norm=(g("post_ffw_norm.weight") if any(p + n in weights for n in ("post_ffw_norm.weight",)) else None),
                 output_scale=(g("layer_output_scale.weight") if p + "layer_output_scale.weight" in weights else None),
+                head_dim=(128 if layer < 3 else 256),
             )
-            if block.q.shape[0] % self.head_dim or block.k.shape[0] % self.head_dim:
+            if block.q.shape[0] % block.head_dim or block.k.shape[0] % block.head_dim:
                 raise ValueError(f"nextn block {layer} has incompatible attention geometry")
-            if block.q.shape[1] != 2816 or block.k.shape[1] != 2816:
-                raise ValueError(f"nextn block {layer} projections must consume hidden size 2816")
+            if block.q.shape[1] != self.pre_projection.shape[0] or block.k.shape[1] != self.pre_projection.shape[0]:
+                raise ValueError(f"nextn block {layer} projections must consume hidden size {self.pre_projection.shape[0]}")
             self.blocks.append(block)
         self.target_lm_head = target_lm_head
         return self
 
-    def _rope(self, x, positions):
+    def _rope(self, x, positions, layer):
         n = x.shape[-1]
-        rot = n  # nextn SWA/full dimensions are fully rotary; full uses the same head width.
-        inv = 1.0 / (10000 ** (torch.arange(0, rot, 2, device=x.device).float() / rot))
+        rot = n
+        base = self.swa_rope_base if layer < 3 else self.rope_base
+        inv = 1.0 / (base ** (torch.arange(0, rot, 2, device=x.device).float() / rot))
+        if layer == 3 and self.rope_freqs is not None:
+            divisors = self.rope_freqs.to(device=x.device, dtype=inv.dtype).flatten()
+            if divisors.numel() < inv.numel():
+                raise ValueError("rope_freqs.weight is shorter than the full-attention head")
+            inv = inv / divisors[: inv.numel()]
         phase = positions[:, None].float() * inv[None]
         c, s = phase.cos().to(x.dtype), phase.sin().to(x.dtype)
         c, s = c[:, None, :], s[:, None, :]
@@ -139,18 +164,17 @@ class GemmaMTPDrafter:
 
     def _run(self, hidden, last_embedding, positions):
         x = _linear(torch.cat((hidden, last_embedding), -1), self.pre_projection)
-        x = _linear(x, self.post_projection)
         for i, b in enumerate(self.blocks):
             residual = x
             h = _rms(x, b.attn_norm, self.eps)
-            num_q = b.q.shape[0] // self.head_dim
-            num_kv = b.k.shape[0] // self.head_dim
-            q = _linear(h, b.q).view(-1, num_q, self.head_dim)
-            k = _linear(h, b.k).view(-1, num_kv, self.head_dim)
-            v = _linear(h, b.v).view(-1, num_kv, self.head_dim)
+            num_q = b.q.shape[0] // b.head_dim
+            num_kv = b.k.shape[0] // b.head_dim
+            q = _linear(h, b.q).view(-1, num_q, b.head_dim)
+            k = _linear(h, b.k).view(-1, num_kv, b.head_dim)
+            v = _linear(h, b.v).view(-1, num_kv, b.head_dim)
             q = _rms(q, b.q_norm, self.eps); k = _rms(k, b.k_norm, self.eps)
-            q, k = self._rope(q, positions), self._rope(k, positions)
-            scores = torch.einsum("thd,shd->hts", q, k) / self.head_dim**0.5
+            q, k = self._rope(q, positions, i), self._rope(k, positions, i)
+            scores = torch.einsum("thd,shd->hts", q, k) / b.head_dim**0.5
             if i < 3 and self.sliding_window:
                 d = positions[:, None] - positions[None, :]
                 scores = scores.masked_fill((d < 0) | (d >= self.sliding_window), -torch.inf)
@@ -159,8 +183,9 @@ class GemmaMTPDrafter:
             probs = scores.softmax(-1)
             v = v.repeat_interleave(num_q // num_kv, 1)
             attn = torch.einsum("hts,shd->thd", probs, v).reshape_as(h)
-            x = residual + _linear(attn, b.o)
-            h = _rms(x, b.post_attn_norm, self.eps)
+            h = _rms(_linear(attn, b.o), b.post_attn_norm, self.eps)
+            x = residual + h
+            h = _rms(x, b.ff_norm, self.eps)
             ff = torch.nn.functional.gelu(_linear(h, b.gate), approximate="tanh") * _linear(h, b.up)
             ff = _linear(ff, b.down)
             if b.post_ff_norm is not None:
@@ -168,17 +193,20 @@ class GemmaMTPDrafter:
             x = x + ff
             if b.output_scale is not None:
                 x = x * b.output_scale.reshape(1, -1)
-        return x
+        return _linear(_rms(x, self.output_norm, self.eps), self.post_projection)
 
     @torch.inference_mode()
-    def draft_step(self, hidden_state, last_token_embedding, target_lm_head=None, positions=None):
+    def draft_step(self, hidden_state, last_token_id, target_lm_head=None, positions=None):
         if self._draft_step is not None:
             return self._draft_step(hidden_state)
         if self.pre_projection is None:
             raise RuntimeError("GemmaMTPDrafter is not loaded")
         if positions is None:
             positions = torch.arange(hidden_state.shape[0], device=hidden_state.device)
-        hidden = self._run(hidden_state, last_token_embedding, positions)
+        if self.embedding is None:
+            raise RuntimeError("GemmaMTPDrafter has no drafter token embedding")
+        last_embedding = self.embedding[last_token_id]
+        hidden = self._run(hidden_state, last_embedding, positions)
         head = target_lm_head or self.target_lm_head
         if head is None:
             raise ValueError("draft_step requires the target LM head (Gemma has no nextn output head)")
@@ -191,9 +219,9 @@ class GemmaMTPDrafter:
         else:
             get = batch.get if isinstance(batch, Mapping) else getattr
             hidden = get("hidden_state") if isinstance(batch, Mapping) else get(batch, "hidden_state")
-            emb = get("last_token_embedding") if isinstance(batch, Mapping) else get(batch, "last_token_embedding")
+            token_id = get("last_token_id") if isinstance(batch, Mapping) else get(batch, "last_token_id")
             head = (batch.get("target_lm_head") if isinstance(batch, Mapping) else getattr(batch, "target_lm_head", None))
-            logits, probabilities = self.draft_step(hidden, emb, head)
+            logits, probabilities = self.draft_step(hidden, token_id, head)
         return MTPProposal(logits=logits, probabilities=probabilities, width=1)
 
 
