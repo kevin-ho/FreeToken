@@ -15,7 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from freetoken.models.gguf.reader import iter_gguf_tensors, load_gguf_metadata
+from freetoken.models.gguf.reader import load_gguf_metadata
 from freetoken.models.loader import ShardReader, iter_weight_files
 from freetoken.utils import cached_load_hf_config
 
@@ -101,10 +101,18 @@ def _gguf_report(path: str) -> dict[str, Any]:
 
     metadata = _json_value(load_gguf_metadata(path))
     tensors = []
-    for tensor in iter_gguf_tensors(path):
-        dtype = gguf.GGMLQuantizationType(tensor.ggml_type).name
+    # GGUFReader tensor descriptors contain all inventory fields. Do not access
+    # tensor.data: iter_gguf_tensors intentionally exposes packed payload bytes.
+    reader = gguf.GGUFReader(path)
+    for tensor in reader.tensors:
+        ggml_type = int(tensor.tensor_type)
         tensors.append(
-            {"name": tensor.name, "dtype": dtype, "ggml_type": tensor.ggml_type, "shape": list(tensor.shape)}
+            {
+                "name": tensor.name,
+                "dtype": tensor.tensor_type.name,
+                "ggml_type": ggml_type,
+                "shape": list(reversed(int(dim) for dim in tensor.shape)),
+            }
         )
     names = [tensor["name"] for tensor in tensors]
     return {

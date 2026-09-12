@@ -6,9 +6,12 @@ import struct
 from pathlib import Path
 
 import pytest
-import torch
 
-safetensors = pytest.importorskip("safetensors")
+safetensors_torch = pytest.importorskip("safetensors.torch")
+torch = pytest.importorskip("torch")
+pytest.importorskip("huggingface_hub")
+pytest.importorskip("transformers")
+pytest.importorskip("tqdm")
 
 
 @pytest.fixture
@@ -32,14 +35,14 @@ def test_inventory_reports_config_flags_shards_and_prefixes(tmp_path, probe):
             }
         )
     )
-    safetensors.torch.save_file(
+    safetensors_torch.save_file(
         {
             "model.layers.1.weight": torch.zeros((4, 4), dtype=torch.float16),
             "model.mtp.draft.weight": torch.ones((4,), dtype=torch.float32),
         },
         str(tmp_path / "model-00002-of-00002.safetensors"),
     )
-    safetensors.torch.save_file(
+    safetensors_torch.save_file(
         {"lm_head.weight": torch.zeros((8, 4), dtype=torch.bfloat16)},
         str(tmp_path / "model-00001-of-00002.safetensors"),
     )
@@ -80,7 +83,7 @@ def _write_tiny_gguf(path: Path) -> None:
         tensor_infos.append(string(name) + struct.pack("<I", len(shape)) + b"".join(struct.pack("<Q", dim) for dim in shape) + struct.pack("<IQ", 0, offset))
         payloads.append(payload)
         offset += len(payload)
-    header = struct.pack("<4sQQQ", b"GGUF", 3, len(tensors), 2) + metadata + b"".join(tensor_infos)
+    header = struct.pack("<4sIQQ", b"GGUF", 3, len(tensors), 2) + metadata + b"".join(tensor_infos)
     data_start = (len(header) + 31) // 32 * 32
     path.write_bytes(header + b"\0" * (data_start - len(header)) + b"".join(payloads))
 

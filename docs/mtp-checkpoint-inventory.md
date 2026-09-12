@@ -7,8 +7,8 @@ Hugging Face safetensors directory or a single local `.gguf` file, and reports
 configuration keys, case-insensitive `mtp`/`draft`/`nextn`/`speculative` key matches,
 per-shard tensor names/dtypes/shapes, prefix groups, and (for GGUF) every metadata
 field. It uses `cached_load_hf_config`, `iter_weight_files`/`ShardReader`, and
-`load_gguf_metadata`/`iter_gguf_tensors`; it does not call `ShardReader.get_tensor()`
-or load model weights.
+`load_gguf_metadata` plus GGUF tensor descriptors; it does not call `ShardReader.get_tensor()`
+or access GGUF tensor payloads or load model weights.
 
 The cache search was read-only. Exact search root and command:
 
