@@ -78,7 +78,7 @@ def test_mtp_final_norm_precedes_post_projection():
     drafter.pre_projection[:, :1024] = torch.eye(1024)
     drafter.post_projection = torch.zeros(2816, 1024)
     drafter.post_projection[:1024] = torch.eye(1024)
-    drafter.output_norm = torch.full((2816,), 2.0)
+    drafter.output_norm = torch.full((1024,), 2.0)
     drafter.blocks = []
     hidden = torch.ones(1, 2816)
     result = drafter._run(hidden, torch.zeros(1, 2816), torch.zeros(1, dtype=torch.long))
@@ -90,7 +90,7 @@ def test_fake_input_forward_uses_caller_target_vocab_head():
     drafter = GemmaMTPDrafter()
     drafter.pre_projection = torch.zeros(1024, 5632)
     drafter.post_projection = torch.zeros(2816, 1024)
-    drafter.output_norm = torch.ones(2816)
+    drafter.output_norm = torch.ones(1024)
     drafter.embedding = torch.zeros(32, 1024)
     ones = torch.ones(1024)
     zero = torch.zeros(1024, 4096)
