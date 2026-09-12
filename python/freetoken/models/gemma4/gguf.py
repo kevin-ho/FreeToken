@@ -29,12 +29,30 @@ if TYPE_CHECKING:
     from freetoken.models.gguf.config import GgufConfigShim
 
 
+MTP_BLOCK_FIELDS = (
+    "attn_norm", "attn_output", "attn_q", "attn_q_norm", "ffn_down",
+    "ffn_gate", "ffn_norm", "ffn_up", "layer_output_scale",
+    "post_attention_norm", "post_ffw_norm",
+)
+MTP_ROOT_TENSORS = (
+    "token_embd.weight", "output_norm.weight", "rope_freqs.weight",
+    "nextn.pre_projection.weight", "nextn.post_projection.weight",
+)
+MTP_TENSOR_INVENTORY = frozenset(
+    MTP_ROOT_TENSORS
+    + tuple(f"nextn.blk.{layer}.{field}.weight" for layer in range(4) for field in MTP_BLOCK_FIELDS)
+)
+MTP_METADATA_PREFIX = "gemma4-assistant."
+MTP_REQUIRED_METADATA = (
+    "block_count", "attention.head_count", "attention.head_count_kv",
+    "attention.key_length", "attention.key_length_swa",
+    "attention.sliding_window_pattern",
+)
+
+
 @dataclass(frozen=True)
 class GemmaMTPGGUFMetadata:
-    """Observed MTP inventory fields; absent fields remain ``None``.
-
-    This is inventory metadata, not a claim that the tensors form an executable drafter.
-    """
+    """The exact frozen Gemma assistant tensor inventory and its geometry metadata."""
 
     token_embd: tuple[str, ...] = ()
     nextn_pre_projection: tuple[str, ...] = ()
@@ -44,31 +62,19 @@ class GemmaMTPGGUFMetadata:
 
 
 def mtp_gguf_metadata(names: Iterator[str], metadata: dict) -> GemmaMTPGGUFMetadata:
-    """Collect only the frozen checkpoint groups, without reading tensor payloads."""
-    names = tuple(sorted(names))
+    names = frozenset(names)
+    if names != MTP_TENSOR_INVENTORY:
+        missing, extra = MTP_TENSOR_INVENTORY - names, names - MTP_TENSOR_INVENTORY
+        raise ValueError(f"Gemma assistant tensor inventory drift (missing={sorted(missing)}, extra={sorted(extra)})")
+    missing = [key for key in MTP_REQUIRED_METADATA if f"{MTP_METADATA_PREFIX}{key}" not in metadata]
+    if missing:
+        raise KeyError(f"missing Gemma assistant metadata: {', '.join(MTP_METADATA_PREFIX + k for k in missing)}")
     return GemmaMTPGGUFMetadata(
-        token_embd=tuple(n for n in names if n == "token_embd.weight"),
-        nextn_pre_projection=tuple(
-            n for n in names if n.startswith("nextn.pre_projection")
-        ),
-        nextn_post_projection=tuple(
-            n for n in names if n.startswith("nextn.post_projection")
-        ),
-        block_groups=tuple(
-            sorted(
-                {
-                    ("nextn." if n.startswith("nextn.") else "")
-                    + n.removeprefix("nextn.").split(".", 2)[0]
-                    + "."
-                    + n.removeprefix("nextn.").split(".", 2)[1]
-                    for n in names
-                    if n.startswith(("blk.", "nextn.blk."))
-                }
-            )
-        ),
-        shared_kv=tuple(
-            sorted(k for k in metadata if k.endswith("attention.head_count_kv"))
-        ),
+        token_embd=("token_embd.weight",),
+        nextn_pre_projection=("nextn.pre_projection.weight",),
+        nextn_post_projection=("nextn.post_projection.weight",),
+        block_groups=tuple(f"nextn.blk.{layer}" for layer in range(4)),
+        shared_kv=(),
     )
 
 

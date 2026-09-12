@@ -16,33 +16,33 @@ import torch
 
 
 def test_synthetic_gguf_mtp_inventory_groups_are_frozen():
-    names = [
-        "blk.1.attn_norm.weight",
-        "nextn.post_projection.weight",
-        "nextn.blk.0.attn_norm.weight",
-        "blk.0.attn_norm.weight",
-        "token_embd.weight",
-        "nextn.pre_projection.weight",
-        "unrelated.tensor",
+    from freetoken.models.gemma4.gguf import MTP_BLOCK_FIELDS, MTP_ROOT_TENSORS
+    names = list(MTP_ROOT_TENSORS) + [
+        f"nextn.blk.{layer}.{field}.weight"
+        for layer in range(4) for field in MTP_BLOCK_FIELDS
     ]
     metadata = {
-        "gemma4.attention.head_count_kv": 8,
-        "gemma4.attention.head_count": 32,
-        "other.attention.head_count_kv": 4,
+        f"gemma4-assistant.{key}": ([True, True, True, False] if key == "attention.sliding_window_pattern" else 4 if key == "block_count" else 32 if key == "attention.head_count" else 8 if key == "attention.head_count_kv" else 128)
+        for key in ("block_count", "attention.head_count", "attention.head_count_kv", "attention.key_length", "attention.key_length_swa", "attention.sliding_window_pattern")
     }
 
     inventory = mtp_gguf_metadata(names, metadata)
-
     assert inventory == GemmaMTPGGUFMetadata(
         token_embd=("token_embd.weight",),
         nextn_pre_projection=("nextn.pre_projection.weight",),
         nextn_post_projection=("nextn.post_projection.weight",),
-        block_groups=("blk.0", "blk.1", "nextn.blk.0"),
-        shared_kv=(
-            "gemma4.attention.head_count_kv",
-            "other.attention.head_count_kv",
-        ),
+        block_groups=("nextn.blk.0", "nextn.blk.1", "nextn.blk.2", "nextn.blk.3"),
+        shared_kv=(),
     )
+
+
+def test_gemma_mtp_inventory_rejects_drift_and_missing_metadata():
+    from freetoken.models.gemma4.gguf import MTP_TENSOR_INVENTORY
+    metadata = {"gemma4-assistant." + key: 1 for key in ("block_count", "attention.head_count", "attention.head_count_kv", "attention.key_length", "attention.key_length_swa", "attention.sliding_window_pattern")}
+    with pytest.raises(ValueError):
+        mtp_gguf_metadata(MTP_TENSOR_INVENTORY | {"nextn.blk.0.attn_k.weight"}, metadata)
+    with pytest.raises(KeyError):
+        mtp_gguf_metadata(MTP_TENSOR_INVENTORY, {})
 
 
 def test_gemma_mtp_public_adapter_delegates_without_inventing_weights():
@@ -92,17 +92,20 @@ def test_fake_input_forward_uses_caller_target_vocab_head():
     drafter.post_projection = torch.zeros(2816, 1024)
     drafter.output_norm = torch.ones(2816)
     drafter.embedding = torch.zeros(32, 2816)
-    ones = torch.ones(2816)
-    zero = torch.zeros(2816, 2816)
-    q = torch.zeros(2816, 2816)
-    k = torch.zeros(256, 2816)
-    block = _Block(ones, torch.ones(128), torch.ones(128), ones, ones, q, k, k, zero,
-                   zero, zero, zero)
+    ones = torch.ones(1024)
+    zero = torch.zeros(1024, 4096)
+    q = torch.zeros(4096, 1024)
+    block = _Block(ones, torch.ones(128), None, ones, ones, q, None, None,
+                   torch.zeros(1024, 1024), zero, zero, zero)
     drafter.blocks = [block, block, block, block]
     hidden = torch.zeros(1, 2816)
     embedding = torch.zeros(1, 2816)
     target_head = torch.nn.Linear(2816, 17, bias=False)
-    logits, probabilities = drafter.draft_step(hidden, torch.tensor([0]), target_head)
+    drafter.num_kv_heads = 2
+    logits, probabilities = drafter.draft_step(
+        hidden, target_lm_head=target_head, embedding=embedding,
+        kv_provider=lambda *_: (torch.zeros(1, 256), torch.zeros(1, 256)),
+    )
     assert logits.shape == (1, 17)
     assert probabilities is None
 

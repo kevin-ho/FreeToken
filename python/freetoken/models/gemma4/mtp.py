@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
+from .gguf import MTP_METADATA_PREFIX, mtp_gguf_metadata
+
 import torch
 
 from freetoken.engine.mtp import MTPProposal
@@ -19,7 +21,7 @@ from freetoken.models.gguf.reader import iter_gguf_tensors
 class _Block:
     attn_norm: torch.Tensor
     q_norm: torch.Tensor
-    k_norm: torch.Tensor
+    k_norm: torch.Tensor | None
     post_attn_norm: torch.Tensor
     ff_norm: torch.Tensor
     q: torch.Tensor
@@ -74,7 +76,7 @@ class GemmaMTPDrafter:
     only; no scheduler state is inspected or modified.
     """
 
-    def __init__(self, draft_step: Callable[..., tuple[Any, Any | None]] | None = None):
+    def __init__(self, draft_step: Callable[..., tuple[Any, Any | None]] | None = None, *, kv_provider=None):
         self._draft_step = draft_step
         self.pre_projection = self.post_projection = self.embedding = None
         self.output_norm = None
@@ -88,6 +90,8 @@ class GemmaMTPDrafter:
         self.swa_rope_base = 10000.0
         self.sliding_window = None
         self.target_lm_head = None
+        # The assistant inventory intentionally has no K/V tensors. The target owns them.
+        self.kv_provider = kv_provider
 
     @classmethod
     def from_gguf(cls, model_path: str, *, target_lm_head=None, device=None):
@@ -103,15 +107,31 @@ class GemmaMTPDrafter:
         self.rope_freqs = root_weights.get("rope_freqs.weight")
         from freetoken.models.gguf.reader import load_gguf_metadata
         metadata = load_gguf_metadata(model_path)
-        self.rope_base = float(metadata.get("gemma4.rope.freq_base", self.rope_base))
-        self.swa_rope_base = float(metadata.get("gemma4.rope.freq_base_swa", self.rope_base))
-        self.sliding_window = int(metadata.get("gemma4.attention.sliding_window", 0)) or None
+        mtp_gguf_metadata(tuple(t.name for t in iter_gguf_tensors(model_path)), metadata)
+        def meta(key):
+            full_key = MTP_METADATA_PREFIX + key
+            if full_key not in metadata:
+                raise KeyError(f"missing Gemma assistant metadata: {full_key}")
+            return metadata[full_key]
+        block_count = int(meta("block_count"))
+        if block_count != 4:
+            raise ValueError(f"Gemma assistant requires 4 blocks, got {block_count}")
+        q_heads = int(meta("attention.head_count"))
+        kv_heads = meta("attention.head_count_kv")
+        pattern = tuple(bool(x) for x in meta("attention.sliding_window_pattern"))
+        if len(pattern) != 4:
+            raise ValueError("Gemma assistant sliding_window_pattern must have 4 entries")
+        swa_dim, full_dim = int(meta("attention.key_length_swa")), int(meta("attention.key_length"))
+        self.num_q_heads, self.num_kv_heads = q_heads, int(kv_heads[0] if isinstance(kv_heads, (list, tuple)) else kv_heads)
+        self.rope_base = float(metadata.get(MTP_METADATA_PREFIX + "rope.freq_base", self.rope_base))
+        self.swa_rope_base = float(metadata.get(MTP_METADATA_PREFIX + "rope.freq_base_swa", self.rope_base))
+        self.sliding_window = int(metadata.get(MTP_METADATA_PREFIX + "attention.sliding_window", 0)) or None
         if tuple(self.pre_projection.shape) != (1024, 5632):
             raise ValueError(f"unexpected nextn pre_projection shape {tuple(self.pre_projection.shape)}")
         if tuple(self.post_projection.shape) != (2816, 1024):
             raise ValueError(f"unexpected nextn post_projection shape {tuple(self.post_projection.shape)}")
-        if self.embedding.ndim != 2 or self.embedding.shape[1] != 2816:
-            raise ValueError(f"unexpected nextn token_embd shape {tuple(self.embedding.shape)}")
+        if self.embedding.ndim != 2 or self.embedding.shape[1] != 1024:
+            raise ValueError(f"unexpected token_embd shape {tuple(self.embedding.shape)}")
         if self.output_norm.ndim != 1 or self.output_norm.shape[0] != self.pre_projection.shape[0]:
             raise ValueError(f"unexpected nextn output_norm shape {tuple(self.output_norm.shape)}")
         if "output.weight" in root_weights:
@@ -129,18 +149,22 @@ class GemmaMTPDrafter:
             p = f"blk.{layer}."
             def g(*names): return _get(weights, *(p + n for n in names))
             block = _Block(
-                g("attn_norm.weight"), g("attn_q_norm.weight"), g("attn_k_norm.weight"),
+                g("attn_norm.weight"), g("attn_q_norm.weight"), None,
                 g("post_attention_norm.weight"), g("ffn_norm.weight"),
-                g("attn_q.weight"), g("attn_k.weight"),
-                g("attn_v.weight", "attn_k.weight"), g("attn_output.weight"),
+                g("attn_q.weight"), None, None, g("attn_output.weight"),
                 g("ffn_gate.weight"), g("ffn_up.weight"), g("ffn_down.weight"),
                 post_ff_norm=(g("post_ffw_norm.weight") if any(p + n in weights for n in ("post_ffw_norm.weight",)) else None),
                 output_scale=(g("layer_output_scale.weight") if p + "layer_output_scale.weight" in weights else None),
-                head_dim=(128 if layer < 3 else 256),
+                head_dim=(swa_dim if pattern[layer] else full_dim),
             )
-            if block.q.shape[0] % block.head_dim or block.k.shape[0] % block.head_dim:
+            expected_q = 4096 if layer < 3 else 8192
+            if block.q.shape[0] != expected_q or block.q.shape[1] != 1024:
+                raise ValueError(f"nextn block {layer} Q must have shape ({expected_q}, 1024)")
+            if block.head_dim != (swa_dim if layer < 3 else full_dim):
+                raise ValueError(f"nextn block {layer} has inconsistent attention geometry")
+            if block.q.shape[0] % block.head_dim:
                 raise ValueError(f"nextn block {layer} has incompatible attention geometry")
-            if block.q.shape[1] != self.pre_projection.shape[0] or block.k.shape[1] != self.pre_projection.shape[0]:
+            if block.q.shape[1] != self.pre_projection.shape[0]:
                 raise ValueError(f"nextn block {layer} projections must consume hidden size {self.pre_projection.shape[0]}")
             self.blocks.append(block)
         self.target_lm_head = target_lm_head
@@ -168,12 +192,16 @@ class GemmaMTPDrafter:
             residual = x
             h = _rms(x, b.attn_norm, self.eps)
             num_q = b.q.shape[0] // b.head_dim
-            num_kv = b.k.shape[0] // b.head_dim
+            num_kv = self.num_kv_heads
             q = _linear(h, b.q).view(-1, num_q, b.head_dim)
-            k = _linear(h, b.k).view(-1, num_kv, b.head_dim)
-            v = _linear(h, b.v).view(-1, num_kv, b.head_dim)
-            q = _rms(q, b.q_norm, self.eps); k = _rms(k, b.k_norm, self.eps)
-            q, k = self._rope(q, positions, i), self._rope(k, positions, i)
+            if self.kv_provider is None:
+                raise RuntimeError("Gemma assistant requires target K/V through kv_provider")
+            k, v = self.kv_provider(i, h, b.head_dim, num_kv)
+            k = k.view(-1, num_kv, b.head_dim)
+            v = v.view(-1, num_kv, b.head_dim)
+            k = self._rope(k, positions, i)
+            q = _rms(q, b.q_norm, self.eps)
+            q = self._rope(q, positions, i)
             scores = torch.einsum("thd,shd->hts", q, k) / b.head_dim**0.5
             if i < 3 and self.sliding_window:
                 d = positions[:, None] - positions[None, :]
@@ -196,16 +224,18 @@ class GemmaMTPDrafter:
         return _linear(_rms(x, self.output_norm, self.eps), self.post_projection)
 
     @torch.inference_mode()
-    def draft_step(self, hidden_state, last_token_id, target_lm_head=None, positions=None):
+    def draft_step(self, hidden_state, last_token_id=None, target_lm_head=None, positions=None, *, embedding=None, kv_provider=None):
         if self._draft_step is not None:
             return self._draft_step(hidden_state)
         if self.pre_projection is None:
             raise RuntimeError("GemmaMTPDrafter is not loaded")
         if positions is None:
             positions = torch.arange(hidden_state.shape[0], device=hidden_state.device)
-        if self.embedding is None:
-            raise RuntimeError("GemmaMTPDrafter has no drafter token embedding")
-        last_embedding = self.embedding[last_token_id]
+        if embedding is None:
+            raise ValueError("draft_step requires the target-provided embedding")
+        last_embedding = embedding
+        if kv_provider is not None:
+            self.kv_provider = kv_provider
         hidden = self._run(hidden_state, last_embedding, positions)
         head = target_lm_head or self.target_lm_head
         if head is None:

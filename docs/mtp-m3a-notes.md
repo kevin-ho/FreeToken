@@ -19,18 +19,36 @@ support for that optional scalar.
 
 ## Verified frozen directions
 
-- `nextn.pre_projection.weight`: `[1024, 5632]`, consumed as
-  `concat(target_hidden[2816], last_token_embedding[2816])`.
-- `nextn.post_projection.weight`: `[2816, 1024]`.
-- `nextn.token_embd.weight`: `[262144, 1024]`; it is the drafter's embedding
-  table and is separate from the target embedding.
-- No `output.weight` is accepted; logits use the target head supplied by the
-  caller.
+The accepted inventory is exact: the five roots `token_embd.weight`,
+`output_norm.weight`, `rope_freqs.weight`, `nextn.pre_projection.weight`, and
+`nextn.post_projection.weight`, plus four blocks each containing exactly
+`attn_norm`, `attn_output`, `attn_q`, `attn_q_norm`, `ffn_down`, `ffn_gate`,
+`ffn_norm`, `ffn_up`, `layer_output_scale`, `post_attention_norm`, and
+`post_ffw_norm`. K/V tensors are deliberately absent; inventory drift hard-fails.
 
-The repository's Gemma4 implementation was used for the norm, hybrid-attention,
-RoPE, and scalar conventions. No contradictory upstream `nextn` implementation
-exists in this worktree, so the frozen tensor structure is the source-specific
-boundary rather than an inferred target-model loader.
+- `nextn.pre_projection.weight`: `[1024, 5632]`, consuming the target-provided
+  `[2816]` hidden component and `[2816]` embedding component concatenated to width
+  5632. The caller must provide the embedding; the drafter does not invent it.
+- `nextn.post_projection.weight`: `[2816, 1024]`.
+- `token_embd.weight`: `[vocab, 1024]` (the vocabulary dimension is checkpoint
+  metadata, not hard-coded).
+- Required metadata uses the `gemma4-assistant.` prefix and includes
+  `block_count`, `attention.head_count`, `attention.head_count_kv`,
+  `attention.key_length`, `attention.key_length_swa`, and
+  `attention.sliding_window_pattern`; missing keys hard-fail. Q widths are 4096
+  for blocks 0-2 and 8192 for block 3. Head dimensions come from the two
+  `key_length` values and the pattern.
+- No `output.weight` is accepted; logits use the target head supplied by the
+  caller, preserving tied-head and standalone scope.
+
+Source evidence for geometry is precise: `python/freetoken/models/gemma4/gguf.py`
+lines 97-146 reads `key_length`, `key_length_swa`, and
+`sliding_window_pattern`, and constructs separate full/SWA attention groups;
+`python/freetoken/models/gemma4/attention.py` lines 30-35 derives Q width from
+head count and head dimension. No upstream/source implementation in this
+worktree defines assistant K/V tensors. Their provenance is unresolved, so the
+adapter requires an explicit `kv_provider(layer, hidden, head_dim, kv_heads)`
+from the target rather than fabricating K/V weights.
 
 ## Box follow-up
 
