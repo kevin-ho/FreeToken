@@ -111,7 +111,7 @@ def _gguf_report(path: str) -> dict[str, Any]:
                 "name": tensor.name,
                 "dtype": tensor.tensor_type.name,
                 "ggml_type": ggml_type,
-                "shape": list(reversed(tensor.shape.tolist())),
+                "shape": list(reversed([int(dim) for dim in tensor.shape])),
             }
         )
     names = [tensor["name"] for tensor in tensors]
