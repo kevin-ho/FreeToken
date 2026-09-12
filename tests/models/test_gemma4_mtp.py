@@ -22,8 +22,8 @@ def test_synthetic_gguf_mtp_inventory_groups_are_frozen():
         for layer in range(4) for field in MTP_BLOCK_FIELDS
     ]
     metadata = {
-        f"gemma4-assistant.{key}": ([True, True, True, False] if key == "attention.sliding_window_pattern" else 4 if key == "block_count" else 32 if key == "attention.head_count" else 8 if key == "attention.head_count_kv" else 128)
-        for key in ("block_count", "attention.head_count", "attention.head_count_kv", "attention.key_length", "attention.key_length_swa", "attention.sliding_window_pattern")
+        f"gemma4-assistant.{key}": ([True, True, True, False] if key == "attention.sliding_window_pattern" else [8, 8, 8, 2] if key == "attention.head_count_kv" else 4 if key == "block_count" else 32 if key == "attention.head_count" else 128 if key in ("attention.key_length", "attention.key_length_swa") else 4096 if key == "attention.sliding_window" else 10000.0)
+        for key in ("block_count", "attention.head_count", "attention.head_count_kv", "attention.key_length", "attention.key_length_swa", "attention.sliding_window_pattern", "attention.sliding_window", "rope.freq_base", "rope.freq_base_swa")
     }
 
     inventory = mtp_gguf_metadata(names, metadata)
@@ -38,7 +38,7 @@ def test_synthetic_gguf_mtp_inventory_groups_are_frozen():
 
 def test_gemma_mtp_inventory_rejects_drift_and_missing_metadata():
     from freetoken.models.gemma4.gguf import MTP_TENSOR_INVENTORY
-    metadata = {"gemma4-assistant." + key: 1 for key in ("block_count", "attention.head_count", "attention.head_count_kv", "attention.key_length", "attention.key_length_swa", "attention.sliding_window_pattern")}
+    metadata = {"gemma4-assistant." + key: 1 for key in ("block_count", "attention.head_count", "attention.head_count_kv", "attention.key_length", "attention.key_length_swa", "attention.sliding_window_pattern", "attention.sliding_window", "rope.freq_base", "rope.freq_base_swa")}
     with pytest.raises(ValueError):
         mtp_gguf_metadata(MTP_TENSOR_INVENTORY | {"nextn.blk.0.attn_k.weight"}, metadata)
     with pytest.raises(KeyError):
@@ -69,7 +69,7 @@ def test_real_gemma_mtp_checkpoint_shape_probe_skips_when_absent():
     drafter = GemmaMTPDrafter.from_gguf(path)
     assert tuple(drafter.pre_projection.shape) == (1024, 5632)
     assert tuple(drafter.post_projection.shape) == (2816, 1024)
-    assert tuple(drafter.embedding.shape) == (262144, 2816)
+    assert tuple(drafter.embedding.shape) == (262144, 1024)
 
 
 def test_mtp_final_norm_precedes_post_projection():
@@ -91,20 +91,24 @@ def test_fake_input_forward_uses_caller_target_vocab_head():
     drafter.pre_projection = torch.zeros(1024, 5632)
     drafter.post_projection = torch.zeros(2816, 1024)
     drafter.output_norm = torch.ones(2816)
-    drafter.embedding = torch.zeros(32, 2816)
+    drafter.embedding = torch.zeros(32, 1024)
     ones = torch.ones(1024)
     zero = torch.zeros(1024, 4096)
     q = torch.zeros(4096, 1024)
     block = _Block(ones, torch.ones(128), None, ones, ones, q, None, None,
                    torch.zeros(1024, 1024), zero, zero, zero)
     drafter.blocks = [block, block, block, block]
+    drafter.attention_pattern = (False, False, False, False)
+    drafter.num_kv_heads_by_layer = (8, 8, 8, 2)
     hidden = torch.zeros(1, 2816)
     embedding = torch.zeros(1, 2816)
     target_head = torch.nn.Linear(2816, 17, bias=False)
     drafter.num_kv_heads = 2
     logits, probabilities = drafter.draft_step(
         hidden, target_lm_head=target_head, embedding=embedding,
-        kv_provider=lambda *_: (torch.zeros(1, 256), torch.zeros(1, 256)),
+        kv_provider=lambda _layer, _hidden, head_dim, kv_heads: (
+            torch.zeros(1, head_dim * kv_heads), torch.zeros(1, head_dim * kv_heads)
+        ),
     )
     assert logits.shape == (1, 17)
     assert probabilities is None

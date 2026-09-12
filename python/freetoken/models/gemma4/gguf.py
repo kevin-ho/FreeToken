@@ -46,7 +46,8 @@ MTP_METADATA_PREFIX = "gemma4-assistant."
 MTP_REQUIRED_METADATA = (
     "block_count", "attention.head_count", "attention.head_count_kv",
     "attention.key_length", "attention.key_length_swa",
-    "attention.sliding_window_pattern",
+    "attention.sliding_window_pattern", "attention.sliding_window",
+    "rope.freq_base", "rope.freq_base_swa",
 )
 
 
@@ -69,6 +70,12 @@ def mtp_gguf_metadata(names: Iterator[str], metadata: dict) -> GemmaMTPGGUFMetad
     missing = [key for key in MTP_REQUIRED_METADATA if f"{MTP_METADATA_PREFIX}{key}" not in metadata]
     if missing:
         raise KeyError(f"missing Gemma assistant metadata: {', '.join(MTP_METADATA_PREFIX + k for k in missing)}")
+    kv_heads = metadata[f"{MTP_METADATA_PREFIX}attention.head_count_kv"]
+    if tuple(int(x) for x in kv_heads) != (8, 8, 8, 2):
+        raise ValueError(
+            "Gemma assistant attention.head_count_kv must be [8, 8, 8, 2], "
+            f"got {kv_heads!r}"
+        )
     return GemmaMTPGGUFMetadata(
         token_embd=("token_embd.weight",),
         nextn_pre_projection=("nextn.pre_projection.weight",),

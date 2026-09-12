@@ -68,9 +68,9 @@ class GemmaMTPDrafter:
     """Execute the observed four-block Gemma ``nextn`` drafter in isolation.
 
     ``from_gguf`` loads ``nextn.pre_projection.weight`` [1024, 5632],
-    ``nextn.post_projection.weight`` [2816, 1024], the drafter embedding, and
-    ``nextn.blk.0`` through ``nextn.blk.3``. ``draft_step`` accepts a target hidden
-    state, a last-token ID for lookup in the drafter embedding, and a target LM head.
+    ``nextn.post_projection.weight`` [2816, 1024], the 1024-wide assistant embedding,
+    and ``nextn.blk.0`` through ``nextn.blk.3``. ``draft_step`` accepts a target hidden
+    state, its target-provided embedding, and a target LM head.
     ``draft_into_batch`` accepts a batch-like object carrying ``hidden_state``,
     ``last_token_id`` and ``target_lm_head`` attributes. The latter is a convenience
     only; no scheduler state is inspected or modified.
@@ -85,17 +85,19 @@ class GemmaMTPDrafter:
         self.head_dim = 128
         self.num_q_heads = 22
         self.num_kv_heads = 2
+        self.num_kv_heads_by_layer = (2, 2, 2, 2)
         self.rope_freqs = None
         self.rope_base = 10000.0
         self.swa_rope_base = 10000.0
         self.sliding_window = None
+        self.attention_pattern = ()
         self.target_lm_head = None
         # The assistant inventory intentionally has no K/V tensors. The target owns them.
         self.kv_provider = kv_provider
 
     @classmethod
-    def from_gguf(cls, model_path: str, *, target_lm_head=None, device=None):
-        self = cls()
+    def from_gguf(cls, model_path: str, *, target_lm_head=None, device=None, kv_provider=None):
+        self = cls(kv_provider=kv_provider)
         weights = _tensor_map(model_path, "nextn.")
         root_weights = _tensor_map(model_path, "")
         self.pre_projection = _get(weights, "pre_projection.weight")
@@ -117,15 +119,22 @@ class GemmaMTPDrafter:
         if block_count != 4:
             raise ValueError(f"Gemma assistant requires 4 blocks, got {block_count}")
         q_heads = int(meta("attention.head_count"))
-        kv_heads = meta("attention.head_count_kv")
+        kv_heads = tuple(int(x) for x in meta("attention.head_count_kv"))
+        if kv_heads != (8, 8, 8, 2):
+            raise ValueError(
+                "Gemma assistant attention.head_count_kv must be [8, 8, 8, 2], "
+                f"got {list(kv_heads)}"
+            )
         pattern = tuple(bool(x) for x in meta("attention.sliding_window_pattern"))
-        if len(pattern) != 4:
-            raise ValueError("Gemma assistant sliding_window_pattern must have 4 entries")
+        if len(pattern) != block_count:
+            raise ValueError("Gemma assistant sliding_window_pattern length must equal block_count")
         swa_dim, full_dim = int(meta("attention.key_length_swa")), int(meta("attention.key_length"))
-        self.num_q_heads, self.num_kv_heads = q_heads, int(kv_heads[0] if isinstance(kv_heads, (list, tuple)) else kv_heads)
-        self.rope_base = float(metadata.get(MTP_METADATA_PREFIX + "rope.freq_base", self.rope_base))
-        self.swa_rope_base = float(metadata.get(MTP_METADATA_PREFIX + "rope.freq_base_swa", self.rope_base))
-        self.sliding_window = int(metadata.get(MTP_METADATA_PREFIX + "attention.sliding_window", 0)) or None
+        self.num_q_heads, self.num_kv_heads = q_heads, kv_heads[0]
+        self.num_kv_heads_by_layer = kv_heads
+        self.attention_pattern = pattern
+        self.rope_base = float(meta("rope.freq_base"))
+        self.swa_rope_base = float(meta("rope.freq_base_swa"))
+        self.sliding_window = int(meta("attention.sliding_window"))
         if tuple(self.pre_projection.shape) != (1024, 5632):
             raise ValueError(f"unexpected nextn pre_projection shape {tuple(self.pre_projection.shape)}")
         if tuple(self.post_projection.shape) != (2816, 1024):
@@ -157,13 +166,12 @@ class GemmaMTPDrafter:
                 output_scale=(g("layer_output_scale.weight") if p + "layer_output_scale.weight" in weights else None),
                 head_dim=(swa_dim if pattern[layer] else full_dim),
             )
-            expected_q = 4096 if layer < 3 else 8192
-            if block.q.shape[0] != expected_q or block.q.shape[1] != 1024:
-                raise ValueError(f"nextn block {layer} Q must have shape ({expected_q}, 1024)")
-            if block.head_dim != (swa_dim if layer < 3 else full_dim):
-                raise ValueError(f"nextn block {layer} has inconsistent attention geometry")
-            if block.q.shape[0] % block.head_dim:
-                raise ValueError(f"nextn block {layer} has incompatible attention geometry")
+            expected_q = q_heads * block.head_dim
+            if tuple(block.q.shape) != (expected_q, 1024):
+                raise ValueError(
+                    f"nextn block {layer} Q must have shape ({expected_q}, 1024), "
+                    f"got {tuple(block.q.shape)}"
+                )
             if block.q.shape[1] != self.pre_projection.shape[0]:
                 raise ValueError(f"nextn block {layer} projections must consume hidden size {self.pre_projection.shape[0]}")
             self.blocks.append(block)
@@ -173,9 +181,9 @@ class GemmaMTPDrafter:
     def _rope(self, x, positions, layer):
         n = x.shape[-1]
         rot = n
-        base = self.swa_rope_base if layer < 3 else self.rope_base
+        base = self.swa_rope_base if self.attention_pattern[layer] else self.rope_base
         inv = 1.0 / (base ** (torch.arange(0, rot, 2, device=x.device).float() / rot))
-        if layer == 3 and self.rope_freqs is not None:
+        if not self.attention_pattern[layer] and self.rope_freqs is not None:
             divisors = self.rope_freqs.to(device=x.device, dtype=inv.dtype).flatten()
             if divisors.numel() < inv.numel():
                 raise ValueError("rope_freqs.weight is shorter than the full-attention head")
@@ -192,7 +200,7 @@ class GemmaMTPDrafter:
             residual = x
             h = _rms(x, b.attn_norm, self.eps)
             num_q = b.q.shape[0] // b.head_dim
-            num_kv = self.num_kv_heads
+            num_kv = self.num_kv_heads_by_layer[i]
             q = _linear(h, b.q).view(-1, num_q, b.head_dim)
             if self.kv_provider is None:
                 raise RuntimeError("Gemma assistant requires target K/V through kv_provider")
@@ -203,7 +211,7 @@ class GemmaMTPDrafter:
             q = _rms(q, b.q_norm, self.eps)
             q = self._rope(q, positions, i)
             scores = torch.einsum("thd,shd->hts", q, k) / b.head_dim**0.5
-            if i < 3 and self.sliding_window:
+            if self.attention_pattern[i] and self.sliding_window:
                 d = positions[:, None] - positions[None, :]
                 scores = scores.masked_fill((d < 0) | (d >= self.sliding_window), -torch.inf)
             else:

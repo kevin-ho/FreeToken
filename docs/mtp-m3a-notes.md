@@ -3,17 +3,17 @@
 ## Implemented surface
 
 `GemmaMTPDrafter.from_gguf()` loads the observed `nextn` GGUF component without
-changing the normal Gemma model or scheduler. It reads the drafter embedding,
-the two projection tensors, and four decoder blocks through the existing GGUF
-reader and `dequantize` machinery. `draft_step` accepts a target hidden state,
-the last-token embedding, and a caller-supplied target LM head, returning logits
-at the target vocabulary size. There is intentionally no `output.weight` or
+changing the normal Gemma model or scheduler. It reads the 1024-wide assistant
+embedding, the two projection tensors, and four decoder blocks through the
+existing GGUF reader and `dequantize` machinery. `draft_step` accepts a target
+hidden state, the target-provided 2816-wide embedding, and a caller-supplied
+target LM head, returning logits at the target vocabulary size. There is intentionally no `output.weight` or
 second LM head in the drafter. `draft_into_batch` is a standalone convenience
 adapter; speculative MTP remains default-off and has no production wiring.
 
 The four blocks implement Gemma-style RMS norms, gated feed-forward, per-head
-Q/K norms, grouped-query attention, causal RoPE, sliding-window attention in
-blocks 0-2, and full attention in block 3. `layer_output_scale` is applied only
+Q norms, grouped-query attention, causal RoPE, and the metadata-provided
+sliding-window/full attention pattern. `layer_output_scale` is applied only
 when that tensor exists in the block, matching the existing Gemma loader's
 support for that optional scalar.
 
