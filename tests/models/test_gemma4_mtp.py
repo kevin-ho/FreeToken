@@ -7,6 +7,9 @@ from freetoken.models.gemma4 import (
 )
 
 
+import json
+
+
 def test_synthetic_gguf_mtp_inventory_groups_are_frozen():
     names = [
         "blk.1.attn_norm.weight",
@@ -59,6 +62,9 @@ def test_speculative_mtp_is_off_by_default_and_parsed_from_server_args(tmp_path)
 
     model_dir = tmp_path / "model"
     model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        json.dumps({"model_type": "gemma4", "architectures": ["Gemma4ForCausalLM"]})
+    )
     argv = ["--model-path", str(model_dir)]
 
     default, _ = parse_args(argv)
