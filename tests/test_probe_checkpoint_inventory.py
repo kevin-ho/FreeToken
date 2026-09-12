@@ -97,6 +97,9 @@ def test_gguf_report_keeps_all_metadata_and_sorts_tensors(tmp_path, probe):
     report = probe.inventory(str(path))
 
     assert report["metadata"] == {
+        "GGUF.version": 3,
+        "GGUF.tensor_count": 2,
+        "GGUF.kv_count": 3,
         "general.architecture": "synthetic",
         "model.mtp.enabled": True,
         "model.labels": ["first", "second"],
