@@ -93,10 +93,12 @@ def test_fake_input_forward_uses_caller_target_vocab_head():
     drafter.output_norm = torch.ones(1024)
     drafter.embedding = torch.zeros(32, 1024)
     ones = torch.ones(1024)
-    zero = torch.zeros(1024, 4096)
+    o_proj = torch.zeros(1024, 4096)
     q = torch.zeros(4096, 1024)
+    gate = torch.zeros(8192, 1024)
+    down = torch.zeros(1024, 8192)
     block = _Block(ones, torch.ones(256), None, ones, ones, q, None, None,
-                   torch.zeros(1024, 4096), zero, zero, zero, head_dim=256)
+                   o_proj, gate, gate, down, head_dim=256)
     drafter.blocks = [block, block, block, block]
     drafter.attention_pattern = (False, False, False, False)
     drafter.num_kv_heads_by_layer = (8, 8, 8, 2)
