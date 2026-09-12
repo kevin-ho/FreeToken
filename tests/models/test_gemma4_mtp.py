@@ -52,11 +52,17 @@ def test_gemma_mtp_public_adapter_delegates_without_inventing_weights():
     assert proposal.width == 1
 
 
-def test_speculative_mtp_is_off_by_default_and_parsed_from_server_args():
+def test_speculative_mtp_is_off_by_default_and_parsed_from_server_args(tmp_path):
+    """parse_args resolves --model-path through the hub layer, so feed it a real
+    (empty) directory; the flag itself needs no weights to parse."""
     from freetoken.server.args import parse_args
 
-    default, _ = parse_args(["--model-path", "/synthetic/model"])
-    enabled, _ = parse_args(["--model-path", "/synthetic/model", "--speculative-mtp"])
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    argv = ["--model-path", str(model_dir)]
+
+    default, _ = parse_args(argv)
+    enabled, _ = parse_args(argv + ["--speculative-mtp"])
 
     assert default.speculative_mtp is False
     assert enabled.speculative_mtp is True
