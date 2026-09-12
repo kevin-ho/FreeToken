@@ -57,9 +57,12 @@ def mtp_gguf_metadata(names: Iterator[str], metadata: dict) -> GemmaMTPGGUFMetad
         block_groups=tuple(
             sorted(
                 {
-                    n.split(".", 2)[0] + "." + n.split(".", 2)[1]
+                    ("nextn." if n.startswith("nextn.") else "")
+                    + n.removeprefix("nextn.").split(".", 2)[0]
+                    + "."
+                    + n.removeprefix("nextn.").split(".", 2)[1]
                     for n in names
-                    if n.startswith("blk.")
+                    if n.startswith(("blk.", "nextn.blk."))
                 }
             )
         ),

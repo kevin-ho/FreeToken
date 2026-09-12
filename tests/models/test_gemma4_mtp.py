@@ -8,12 +8,16 @@ from freetoken.models.gemma4 import (
 
 
 import json
+import os
+
+import pytest
 
 
 def test_synthetic_gguf_mtp_inventory_groups_are_frozen():
     names = [
         "blk.1.attn_norm.weight",
         "nextn.post_projection.weight",
+        "nextn.blk.0.attn_norm.weight",
         "blk.0.attn_norm.weight",
         "token_embd.weight",
         "nextn.pre_projection.weight",
@@ -31,7 +35,7 @@ def test_synthetic_gguf_mtp_inventory_groups_are_frozen():
         token_embd=("token_embd.weight",),
         nextn_pre_projection=("nextn.pre_projection.weight",),
         nextn_post_projection=("nextn.post_projection.weight",),
-        block_groups=("blk.0", "blk.1"),
+        block_groups=("blk.0", "blk.1", "nextn.blk.0"),
         shared_kv=(
             "gemma4.attention.head_count_kv",
             "other.attention.head_count_kv",
@@ -53,6 +57,17 @@ def test_gemma_mtp_public_adapter_delegates_without_inventing_weights():
     assert proposal.logits == "logits"
     assert proposal.probabilities == "probabilities"
     assert proposal.width == 1
+
+
+@pytest.mark.needs_weights
+def test_real_gemma_mtp_checkpoint_shape_probe_skips_when_absent():
+    path = os.environ.get("FREETOKEN_TEST_MTP_GGUF")
+    if not path or not os.path.isfile(path):
+        pytest.skip("set FREETOKEN_TEST_MTP_GGUF to a real Gemma MTP GGUF")
+    drafter = GemmaMTPDrafter.from_gguf(path)
+    assert tuple(drafter.pre_projection.shape) == (1024, 5632)
+    assert tuple(drafter.post_projection.shape) == (2816, 1024)
+    assert tuple(drafter.embedding.shape) == (262144, 1024)
 
 
 def test_speculative_mtp_is_off_by_default_and_parsed_from_server_args(tmp_path):
