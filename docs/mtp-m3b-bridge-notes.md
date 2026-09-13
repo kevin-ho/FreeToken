@@ -19,25 +19,23 @@ mapping is missing.
   complete bridge and calls `run_k1_transaction`; otherwise it uses the ordinary
   `Engine.forward_batch()` path. The scheduler remains the page/cache owner.
 - `python/freetoken/models/gemma4/mtp.py`: the provider performs no allocation or
-  writes. The mapping defaults to assistant layers `(0, 1, 2, 3)` reading target
-  layers `(26, 27, 28, 29)` for the 30-layer 26B/A4B checkpoint, and can be replaced
-  explicitly with `--gemma-mtp-layer-mapping`.
+  writes. The mapping must be supplied explicitly with `--gemma-mtp-layer-mapping`;
+  there is no automatic default because the available source does not prove assistant
+  blocks can read target KV rows.
 
 ## Mapping evidence
 
-The default is source-grounded, not inferred from checkpoint names. In llama.cpp commit
-[`73159c30399a77144f59d37fde504dfd00afbea5`](https://github.com/ggml-org/llama.cpp/commit/73159c30399a77144f59d37fde504dfd00afbea5),
+The source evidence does **not** support an automatic assistant-to-target mapping. In
+llama.cpp commit [`73159c30399a77144f59d37fde504dfd00afbea5`](https://github.com/ggml-org/llama.cpp/commit/73159c30399a77144f59d37fde504dfd00afbea5),
 `src/models/gemma4.cpp:7-10` reads `attention.shared_kv_layers` and sets
-`n_layer_kv_from_start = n_layer_all - n_kv_shared_layers`; its attention graph then
-reuses KV for layers after that boundary (`src/models/gemma4.cpp:242-247`). The
-assistant source reads the same shared-KV metadata (`src/models/gemma4-assistant.cpp:7-10`)
-and constructs exactly four assistant blocks (`:47-77`), while its graph calls the
-assistant attention with no K/V tensors (`:127-151`). For the confirmed 30-layer
-checkpoint, four shared layers therefore begin at 30 - 4 = 26: the source-majority
-mapping is `(0,1,2,3) -> (26,27,28,29)`. This is a mapping of assistant blocks to the
-shared target KV tail, not a claim that assistant block number equals target block
-number. If a future checkpoint has different shared-KV metadata, it must pass a new
-explicit mapping rather than changing this fallback silently.
+`n_layer_kv_from_start = n_layer_all - n_kv_shared_layers`; its target attention graph
+reuses earlier KV for target layers after that boundary (`src/models/gemma4.cpp:242-247`).
+For a 30-layer target with four shared layers, that identifies target layers 26-29.
+However, `src/models/gemma4-assistant.cpp:127-151` calls assistant attention with null
+K/V tensors, and does not map assistant block 0-3 to target layers 26-29. The assistant
+loader's `shared_kv_layers` read (`:7-10`) therefore cannot by itself justify that
+mapping. The candidate must pass `--gemma-mtp-layer-mapping` only after a checkpoint and
+runtime probe establish the required provider contract; the safe default is unset.
 
 The same source exposes the target post-final-norm hidden state as `h_nextn`
 (`src/models/gemma4.cpp:382-387`) and the assistant consumes target token embeddings
@@ -52,18 +50,26 @@ release remain in the scheduler's existing lifecycle.
 
 ## Validation evidence (M3b completion attempt)
 
-Environment inspection on 2026-09-12:
+Validation evidence (Phase C attempt, 2026-09-12):
 
-- `git worktree list` showed only `/home/vesper/FreeToken`; no candidate checkout or
-  `candidate.env` was visible under `/home` or `/mnt`. No production files were changed.
-- `/home/kho/models/mtp-drafters/mtp-gemma-4-26B-A4B-it.gguf` returned `ENOENT` in this
-  execution environment, so real-file load/inventory/shape/metadata validation could not
-  run. No substitute checkpoint was used.
-- The permitted candidate-only rebuild, server comparison (greedy flag off/on), and
-  ~256-token ON generation were not run because the candidate and real file were absent.
-  No full judge or benchmark-shaped work was run.
-- `python3 -m compileall -q python/freetoken`: passed.
-- `git diff --check`: passed.
-- Focused pytest was attempted with
-  `python3 -m pytest -q tests/engine/test_mtp_transaction.py tests/scheduler/test_mtp_hook.py`;
-  blocked because `pytest` is not installed (`No module named pytest`).
+- From this session, SSH to ASTRALPLANE did not complete: attempts returned `connection
+  reset by peer` and then `timed out during banner exchange`. Consequently no candidate
+  command was run, no candidate checkout was synced or rebuilt, and production was not
+  touched.
+- The user-provided host evidence is recorded as the authoritative file fact:
+  `/home/kho/models/mtp-drafters/mtp-gemma-4-26B-A4B-it.gguf` exists on ASTRALPLANE and
+  is 251939328 bytes; it was not reachable from this session, so there is no claimed
+  inventory/shape/metadata output here. The required command to capture when SSH is
+  available is:
+  `FREETOKEN_TEST_MTP_GGUF=/home/kho/models/mtp-drafters/mtp-gemma-4-26B-A4B-it.gguf
+  python3 - <<'PY' ... GemmaMTPDrafter.from_gguf(...) ... PY`.
+- Flag OFF/ON exactness and short ON generation were not run because candidate setup and
+  the real GPU environment were unreachable. No substitute checkpoint or benchmark was
+  used.
+- Local source verification fetched llama.cpp commit
+  `73159c30399a77144f59d37fde504dfd00afbea5`: `gemma4.cpp:7-10` derives target KV
+  reuse from `shared_kv_layers`, `gemma4.cpp:242-247` reuses target KV, while
+  `gemma4-assistant.cpp:127-151` passes null K/V to assistant attention. This supports
+  removing the automatic `(26,27,28,29)` mapping default.
+- Local checks: `python3 -m compileall -q python/freetoken` passed and `git diff --check`
+  passed. Focused pytest was not run locally because pytest is unavailable.

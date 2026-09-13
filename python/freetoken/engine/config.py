@@ -15,10 +15,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Gemma-4 26B/A4B has four shared target-KV layers at the end of its 30-layer
-# backbone. This is the source-grounded default for the checkpoint supported by
-# the M3b bridge; other checkpoints must pass their own explicit mapping.
-GEMMA_MTP_DEFAULT_LAYER_MAPPING = (26, 27, 28, 29)
+# The public llama.cpp sources establish target-layer KV reuse, but do not establish
+# that Gemma assistant blocks read those target KV rows. Require an explicit mapping
+# until a checkpoint/runtime probe proves that contract.
+GEMMA_MTP_DEFAULT_LAYER_MAPPING = None
 
 
 @dataclass(frozen=True)
