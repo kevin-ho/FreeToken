@@ -2,11 +2,10 @@
 
 ## Status
 
-The production callback bridge is implemented, but bench smoke is **blocked**: this
-checkout has no validated real Gemma MTP GGUF available in the test environment, and
-GPU benchmark-shaped work was not run locally. The bridge therefore fails closed when
-the flag, GGUF assistant inventory, prepared single-request inputs, or explicit KV
-mapping is missing.
+The production callback bridge is implemented, but bench smoke is **blocked**: the
+real Gemma MTP GGUF is reachable and its loader fails on inventory drift, so no GPU
+benchmark-shaped work was run. The bridge therefore fails closed when the flag, GGUF
+assistant inventory, prepared single-request inputs, or explicit KV mapping is missing.
 
 ## Bridge touchpoints
 
@@ -68,18 +67,11 @@ Validation evidence (Phase C attempt, 2026-09-12):
   Drafter construction therefore failed, so no smoke was run. This provides no
   exactness or generation evidence.
 
-- From this session, SSH to ASTRALPLANE did not complete: attempts returned `connection
-  reset by peer` and then `timed out during banner exchange`. Consequently no candidate
-  checkout was synced or rebuilt from this session, and production was not touched.
-- The user-provided host evidence is recorded as the authoritative file fact:
-  `/home/kho/models/mtp-drafters/mtp-gemma-4-26B-A4B-it.gguf` exists on ASTRALPLANE and
-  is 251939328 bytes; it was not reachable from this session, so there is no claimed
-  inventory/shape/metadata output here. The required command to capture when SSH is
-  available is:
-  `FREETOKEN_TEST_MTP_GGUF=/home/kho/models/mtp-drafters/mtp-gemma-4-26B-A4B-it.gguf
-  python3 - <<'PY' ... GemmaMTPDrafter.from_gguf(...) ... PY`.
-- Flag OFF/ON exactness and short ON generation were not run because candidate setup and
-  the real GPU environment were unreachable. No substitute checkpoint or benchmark was
+- The session connected to ASTRALPLANE through the `astralplane` SSH alias, synced the
+  candidate checkout at commit `26a70bf`, and verified that the real GGUF exists at
+  `/home/kho/models/mtp-drafters/mtp-gemma-4-26B-A4B-it.gguf` with size 251939328 bytes.
+- Flag OFF/ON exactness and short ON generation were not run because drafter construction
+  failed at real-file inventory validation. No substitute checkpoint or benchmark was
   used.
 - Local source verification fetched llama.cpp commit
   `73159c30399a77144f59d37fde504dfd00afbea5`: `gemma4.cpp:7-10` derives target KV
