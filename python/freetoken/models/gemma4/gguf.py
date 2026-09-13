@@ -40,7 +40,10 @@ MTP_ROOT_TENSORS = (
 )
 MTP_TENSOR_INVENTORY = frozenset(
     MTP_ROOT_TENSORS
-    + tuple(f"nextn.blk.{layer}.{field}.weight" for layer in range(4) for field in MTP_BLOCK_FIELDS)
+    # Real Unsloth drafter GGUF (frozen probe, evidence/drafter-inventory-full.json):
+    # blocks live at the ROOT as blk.{0-3}.*, NOT nextn.blk.*. Only the two
+    # projections carry the nextn. prefix.
+    + tuple(f"blk.{layer}.{field}.weight" for layer in range(4) for field in MTP_BLOCK_FIELDS)
 )
 MTP_METADATA_PREFIX = "gemma4-assistant."
 MTP_REQUIRED_METADATA = (
@@ -80,7 +83,7 @@ def mtp_gguf_metadata(names: Iterator[str], metadata: dict) -> GemmaMTPGGUFMetad
         token_embd=("token_embd.weight",),
         nextn_pre_projection=("nextn.pre_projection.weight",),
         nextn_post_projection=("nextn.post_projection.weight",),
-        block_groups=tuple(f"nextn.blk.{layer}" for layer in range(4)),
+        block_groups=tuple(f"blk.{layer}" for layer in range(4)),
         shared_kv=(),
     )
 

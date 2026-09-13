@@ -127,8 +127,10 @@ class GemmaMTPDrafter:
     @classmethod
     def from_gguf(cls, model_path: str, *, target_lm_head=None, device=None, kv_provider=None):
         self = cls(kv_provider=kv_provider)
-        weights = _tensor_map(model_path, "nextn.")
-        root_weights = _tensor_map(model_path, "")
+        # Real drafter layout: projections under nextn.*, blocks at the ROOT
+        # (blk.{0-3}.*) per the frozen 49-tensor inventory.
+        weights = _tensor_map(model_path, "")
+        root_weights = weights
         self.pre_projection = _get(weights, "pre_projection.weight")
         self.post_projection = _get(weights, "post_projection.weight")
         self.output_norm = _get(root_weights, "output_norm.weight")

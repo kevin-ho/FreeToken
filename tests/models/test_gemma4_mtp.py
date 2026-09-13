@@ -20,7 +20,7 @@ import torch
 def test_synthetic_gguf_mtp_inventory_groups_are_frozen():
     from freetoken.models.gemma4.gguf import MTP_BLOCK_FIELDS, MTP_ROOT_TENSORS
     names = list(MTP_ROOT_TENSORS) + [
-        f"nextn.blk.{layer}.{field}.weight"
+        f"blk.{layer}.{field}.weight"
         for layer in range(4) for field in MTP_BLOCK_FIELDS
     ]
     metadata = {
@@ -33,7 +33,7 @@ def test_synthetic_gguf_mtp_inventory_groups_are_frozen():
         token_embd=("token_embd.weight",),
         nextn_pre_projection=("nextn.pre_projection.weight",),
         nextn_post_projection=("nextn.post_projection.weight",),
-        block_groups=("nextn.blk.0", "nextn.blk.1", "nextn.blk.2", "nextn.blk.3"),
+        block_groups=("blk.0", "blk.1", "blk.2", "blk.3"),
         shared_kv=(),
     )
 
@@ -42,7 +42,7 @@ def test_gemma_mtp_inventory_rejects_drift_and_missing_metadata():
     from freetoken.models.gemma4.gguf import MTP_TENSOR_INVENTORY
     metadata = {"gemma4-assistant." + key: 1 for key in ("block_count", "attention.head_count", "attention.head_count_kv", "attention.key_length", "attention.key_length_swa", "attention.sliding_window_pattern", "attention.sliding_window", "rope.freq_base", "rope.freq_base_swa")}
     with pytest.raises(ValueError):
-        mtp_gguf_metadata(MTP_TENSOR_INVENTORY | {"nextn.blk.0.attn_k.weight"}, metadata)
+        mtp_gguf_metadata(MTP_TENSOR_INVENTORY | {"blk.0.attn_k.weight"}, metadata)
     with pytest.raises(KeyError):
         mtp_gguf_metadata(MTP_TENSOR_INVENTORY, {})
 
