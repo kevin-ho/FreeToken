@@ -100,6 +100,8 @@ class Gemma4Model(BaseOP):
 
 class Gemma4ForCausalLM(BaseLLMModel):
     def __init__(self, config: ModelConfig):
+        self._speculative_mtp = False
+        self.mtp_hidden_state = None
         self.model = Gemma4Model(config)
         self.lm_head = ParallelLMHead(
             num_embeddings=config.vocab_size,
@@ -122,6 +124,12 @@ class Gemma4ForCausalLM(BaseLLMModel):
         if is_gguf_model(config):
             convert_gemma4_to_gguf(self, config)
 
+    def enable_speculative_mtp(self, enabled: bool = True) -> None:
+        """Opt in to retaining the post-norm state for the Gemma MTP adapter."""
+        self._speculative_mtp = enabled
+        if not enabled:
+            self.mtp_hidden_state = None
+
     @torch.inference_mode()
     def encode_images(
         self, pixel_values: torch.Tensor, image_position_ids: torch.Tensor
@@ -135,7 +143,16 @@ class Gemma4ForCausalLM(BaseLLMModel):
         return self.embed_vision.forward(features)
 
     def forward(self) -> torch.Tensor:
-        output = self.model.forward(get_global_ctx().batch.input_ids)
+        batch = get_global_ctx().batch
+        if self._speculative_mtp:
+            self.mtp_hidden_state = None
+            batch.mtp_hidden_state = None
+        output = self.model.forward(batch.input_ids)
+        if self._speculative_mtp:
+            # Keep the normal tensor return convention; the opt-in adapter reads this
+            # side-channel after the producing target forward has completed.
+            self.mtp_hidden_state = output
+            batch.mtp_hidden_state = output
         logits = self.lm_head.forward(output)
         if self._final_logit_softcapping is not None:
             cap = self._final_logit_softcapping

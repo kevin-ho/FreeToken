@@ -17,6 +17,35 @@ from freetoken.models.gguf.dequant import dequantize
 from freetoken.models.gguf.reader import iter_gguf_tensors
 
 
+class TargetKvProvider:
+    """Read existing target paged-KV rows for an assistant layer.
+
+    ``layer_mapping`` is mandatory: each assistant layer names the target global
+    layer whose KV rows it reuses. This object only gathers rows already owned by
+    the target pool; it never allocates, writes, or caches speculative state.
+    """
+
+    def __init__(self, cache, page_table_row, positions, layer_mapping):
+        if not layer_mapping:
+            raise ValueError("Gemma MTP requires an explicit shared-KV layer mapping")
+        if page_table_row.ndim != 1:
+            raise ValueError("TargetKvProvider requires one prepared request page-table row")
+        self.cache = cache
+        self.page_table_row = page_table_row
+        self.positions = positions
+        self.layer_mapping = tuple(int(x) for x in layer_mapping)
+
+    def __call__(self, layer, _hidden, _head_dim, _kv_heads):
+        try:
+            target_layer = self.layer_mapping[layer]
+        except IndexError as exc:
+            raise KeyError(f"no target KV mapping for assistant layer {layer}") from exc
+        indices = self.page_table_row.index_select(0, self.positions)
+        k = self.cache.k_cache(target_layer).index_select(0, indices)
+        v = self.cache.v_cache(target_layer).index_select(0, indices)
+        return k, v
+
+
 @dataclass
 class _Block:
     attn_norm: torch.Tensor
@@ -259,11 +288,20 @@ class GemmaMTPDrafter:
             logits, probabilities = self._draft_step(batch)
         else:
             get = batch.get if isinstance(batch, Mapping) else getattr
+            def value(name, default=None):
+                return batch.get(name, default) if isinstance(batch, Mapping) else getattr(batch, name, default)
             hidden = get("hidden_state") if isinstance(batch, Mapping) else get(batch, "hidden_state")
-            token_id = get("last_token_id") if isinstance(batch, Mapping) else get(batch, "last_token_id")
-            head = (batch.get("target_lm_head") if isinstance(batch, Mapping) else getattr(batch, "target_lm_head", None))
-            logits, probabilities = self.draft_step(hidden, token_id, head)
+            token_id = value("last_token_id")
+            head = value("target_lm_head")
+            logits, probabilities = self.draft_step(
+                hidden,
+                token_id,
+                head,
+                positions=value("positions"),
+                embedding=value("last_embedding"),
+                kv_provider=value("kv_provider", self.kv_provider),
+            )
         return MTPProposal(logits=logits, probabilities=probabilities, width=1)
 
 
-__all__ = ["GemmaMTPDrafter"]
+__all__ = ["GemmaMTPDrafter", "TargetKvProvider"]

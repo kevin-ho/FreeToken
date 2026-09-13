@@ -327,6 +327,8 @@ class Engine:
         with torch.device("meta"), torch_dtype(config.dtype):
             self.model = create_model(config.model_config)
         self.model.load_state_dict(self._load_weight_state_dict(config))
+        if config.speculative_mtp and hasattr(self.model, "enable_speculative_mtp"):
+            self.model.enable_speculative_mtp()
         finalize_quant(self.model)
         post_weights_free = self._sync_get_memory()[0]
         self._weights_bytes = self._baseline_free - post_weights_free

@@ -9,7 +9,7 @@ from .gguf import (
     parse_gguf_config,
 )
 from .model import Gemma4ForCausalLM
-from .mtp import GemmaMTPDrafter
+from .mtp import GemmaMTPDrafter, TargetKvProvider
 from .moe import Gemma4Router
 from .vision import Gemma4MultimodalEmbedder, Gemma4VisionModel
 from .weight import (
@@ -26,6 +26,7 @@ __all__ = [
     "Gemma4Router",
     "Gemma4VisionModel",
     "GemmaMTPDrafter",
+    "TargetKvProvider",
     "GemmaMTPGGUFMetadata",
     "mtp_gguf_metadata",
     "parse_config",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from freetoken.models.gemma4 import (
     GemmaMTPDrafter,
+    TargetKvProvider,
     GemmaMTPGGUFMetadata,
     mtp_gguf_metadata,
 )
@@ -70,6 +71,27 @@ def test_real_gemma_mtp_checkpoint_shape_probe_skips_when_absent():
     assert tuple(drafter.pre_projection.shape) == (1024, 5632)
     assert tuple(drafter.post_projection.shape) == (2816, 1024)
     assert tuple(drafter.embedding.shape) == (262144, 1024)
+
+
+def test_target_kv_provider_uses_shared_mapping_and_paged_rows():
+    class Cache:
+        def k_cache(self, layer):
+            return torch.tensor([[layer, 10], [layer, 20], [layer, 30]])
+
+        def v_cache(self, layer):
+            return torch.tensor([[layer + 100, 10], [layer + 100, 20], [layer + 100, 30]])
+
+    provider = TargetKvProvider(
+        Cache(), torch.tensor([2, 0, 1]), torch.tensor([0, 2]), (3, 1)
+    )
+    k, v = provider(0, None, 1, 1)
+    torch.testing.assert_close(k, torch.tensor([[3, 30], [3, 20]]))
+    torch.testing.assert_close(v, torch.tensor([[103, 30], [103, 20]]))
+
+
+def test_target_kv_provider_rejects_unmapped_rows():
+    with pytest.raises(ValueError, match="one prepared request"):
+        TargetKvProvider(object(), torch.zeros(1, 2), torch.zeros(1, dtype=torch.long), (0,))
 
 
 def test_mtp_final_norm_precedes_post_projection():
