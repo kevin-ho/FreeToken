@@ -22,6 +22,7 @@ def test_flagged_single_request_hook_drafts_before_target_and_commits(monkeypatc
         target_lm_head=object(),
     )
     engine = SimpleNamespace(
+        prepare_mtp_batch=lambda value: True,
         mtp_drafter=SimpleNamespace(
             draft_into_batch=lambda value: (events.append("draft") or MTPProposal(_logits(3), None, 1))
         ),
@@ -45,6 +46,7 @@ def test_flagged_hook_fails_closed_without_gemma_inputs():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.config = SimpleNamespace(speculative_mtp=True)
     scheduler.engine = SimpleNamespace(
+        prepare_mtp_batch=lambda value: False,
         mtp_drafter=SimpleNamespace(draft_into_batch=lambda _: None),
         verify_mtp_batch=lambda *_: None,
         commit_mtp_batch=lambda *_: None,

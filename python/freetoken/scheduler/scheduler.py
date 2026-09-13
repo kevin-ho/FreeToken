@@ -875,28 +875,18 @@ class Scheduler(SchedulerIOMixin):
         if not self.config.speculative_mtp or len(batch.reqs) != 1:
             return None
         drafter = getattr(self.engine, "mtp_drafter", None)
+        prepare = getattr(self.engine, "prepare_mtp_batch", None)
         verify = getattr(self.engine, "verify_mtp_batch", None)
         commit = getattr(self.engine, "commit_mtp_batch", None)
-        if not hasattr(drafter, "draft_into_batch") or not callable(verify) or not callable(commit):
-            return None
-
-        # These are deliberately best-effort adapters for the real model objects.  A
-        # checkpoint-specific engine callback may provide stricter inputs instead.
-        model = getattr(self.engine, "model", None)
-        hidden = getattr(batch, "mtp_hidden_state", None)
-        if hidden is None:
-            hidden = getattr(model, "mtp_hidden_state", None)
-        if hidden is not None:
-            batch.hidden_state = hidden
-        if model is not None:
-            batch.target_lm_head = getattr(model, "lm_head", None)
-            target_model = getattr(model, "model", None)
-            embedding = getattr(target_model, "embed_tokens", None)
-            if embedding is not None and hasattr(batch, "input_ids"):
-                batch.last_embedding = embedding.forward(batch.input_ids[-1:].reshape(-1))
-        if not hasattr(batch, "positions"):
-            return None
-        if getattr(batch, "hidden_state", None) is None or getattr(batch, "target_lm_head", None) is None:
+        abort = getattr(self.engine, "abort_mtp_batch", None)
+        if (
+            not hasattr(drafter, "draft_into_batch")
+            or not callable(prepare)
+            or not callable(verify)
+            or not callable(commit)
+            or not callable(abort)
+            or not prepare(batch)
+        ):
             return None
 
         run_k1_transaction(
@@ -904,7 +894,7 @@ class Scheduler(SchedulerIOMixin):
             drafter,
             lambda prepared: verify(prepared, sample_args),
             commit,
-            getattr(self.engine, "abort_mtp_batch", lambda _: None),
+            abort,
         )
         # Commit owns the normal sampled ForwardOutput.  Without it, fail closed rather than
         # running a second target forward after the transaction has committed.

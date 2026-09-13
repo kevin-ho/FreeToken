@@ -15,6 +15,8 @@ from freetoken.layers import set_rope_device
 from freetoken.layers.quantization import LayerKind, QuantBackend, finalize_quant, set_quant_backend
 from freetoken.moe.offload_cache import iter_offload_moe_layers
 from freetoken.models import create_model, load_weight
+from freetoken.models.gemma4 import GemmaMTPDrafter, TargetKvProvider
+from freetoken.models.gguf.reader import is_gguf_path
 from freetoken.moe import is_offload_moe_strategy
 from freetoken.moe.expert_banks import load_expert_banks
 from freetoken.moe.host_banks import PinFailed
@@ -327,6 +329,10 @@ class Engine:
         with torch.device("meta"), torch_dtype(config.dtype):
             self.model = create_model(config.model_config)
         self.model.load_state_dict(self._load_weight_state_dict(config))
+        self.mtp_drafter = None
+        self.verify_mtp_batch = None
+        self.commit_mtp_batch = None
+        self.abort_mtp_batch = None
         if config.speculative_mtp and hasattr(self.model, "enable_speculative_mtp"):
             self.model.enable_speculative_mtp()
         finalize_quant(self.model)
@@ -393,6 +399,7 @@ class Engine:
         # re-point here (and again on any table realloc). The graph-input snapshot that reads
         # through them belongs to the attention backend, built later in init_capture_graph.
         self.kv_cache.attach_page_table(self.page_table)
+        self._init_mtp_bridge(config)
 
         # ======================= Attention backend initialization ========================
         self.ctx.attn_backend = self.attn_backend = create_attention_backend(
@@ -435,6 +442,68 @@ class Engine:
         if config.attention_backend.split(",")[0] == "triton":
             # Prefill runs on the first comma part; warm its autotune cache.
             self._warmup_prefill()
+
+    def _init_mtp_bridge(self, config: EngineConfig) -> None:
+        """Install the opt-in Gemma bridge only for a validated MTP GGUF."""
+        if not config.speculative_mtp or not is_gguf_path(config.model_path):
+            return
+        try:
+            self.mtp_drafter = GemmaMTPDrafter.from_gguf(
+                config.model_path, target_lm_head=self.model.lm_head, device=self.device
+            )
+        except Exception:  # noqa: BLE001 - speculative setup must fail closed
+            # MTP is an optional acceleration path; an incomplete inventory must not
+            # change ordinary serving or make startup depend on speculative weights.
+            self.mtp_drafter = None
+            return
+
+        def prepare(batch: Batch) -> bool:
+            if len(batch.reqs) != 1 or not hasattr(batch, "positions"):
+                return False
+            req = batch.reqs[0]
+            positions = batch.positions
+            if positions.ndim != 1:
+                return False
+            try:
+                row = self.page_table[req.table_idx]
+                # Gemma assistant blocks reuse the corresponding target blocks. This
+                # is the four-block layout in llama.cpp's Gemma assistant graph:
+                # src/models/gemma4-assistant.cpp@73159c3 (graph construction), with
+                # target shared-KV selection in src/models/gemma4.cpp@73159c3.
+                batch.kv_provider = TargetKvProvider(
+                    self.kv_cache, row, positions, (0, 1, 2, 3)
+                )
+                hidden = getattr(batch, "mtp_hidden_state", None)
+                batch.hidden_state = hidden[-1:] if hidden is not None else None
+                batch.target_lm_head = self.model.lm_head
+                embedding = self.model.model.embed_tokens
+                batch.last_embedding = embedding.forward(batch.input_ids[-1:].reshape(-1))
+            except (AttributeError, IndexError, RuntimeError, ValueError):
+                return False
+            return batch.hidden_state is not None
+
+        def verify(batch: Batch, args):
+            # Exactly one ordinary target forward supplies both target prediction and
+            # the ForwardOutput retained for the normal scheduler drain.
+            output = self.forward_batch(batch, args)
+            batch.mtp_verify_output = output
+            return output.next_tokens_gpu
+
+        def commit(batch: Batch, result):
+            if getattr(batch, "mtp_forward_output", None) is not None:
+                return
+            # verify stores the ordinary output so the scheduler can drain it normally.
+            batch.mtp_forward_output = batch.mtp_verify_output
+
+        def abort(batch: Batch):
+            if getattr(batch, "mtp_aborted", False):
+                return
+            batch.mtp_aborted = True
+
+        self.prepare_mtp_batch = prepare
+        self.verify_mtp_batch = verify
+        self.commit_mtp_batch = commit
+        self.abort_mtp_batch = abort
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
         if config.tp_info.size == 1 or config.use_pynccl:
