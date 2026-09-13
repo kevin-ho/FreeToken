@@ -287,15 +287,13 @@ class GemmaMTPDrafter:
         if self._draft_step is not None:
             logits, probabilities = self._draft_step(batch)
         else:
-            get = batch.get if isinstance(batch, Mapping) else getattr
             def value(name, default=None):
                 return batch.get(name, default) if isinstance(batch, Mapping) else getattr(batch, name, default)
-            hidden = get("hidden_state") if isinstance(batch, Mapping) else get(batch, "hidden_state")
-            token_id = value("last_token_id")
+            hidden = value("hidden_state")
             head = value("target_lm_head")
             logits, probabilities = self.draft_step(
                 hidden,
-                token_id,
+                value("last_token_id"),
                 head,
                 positions=value("positions"),
                 embedding=value("last_embedding"),

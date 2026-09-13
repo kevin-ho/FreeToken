@@ -34,6 +34,33 @@ configuration, nor does it establish that every real assistant checkpoint can
 reuse target rows. The provider therefore requires an explicit mapping and is
 not wired automatically. There is no fake K/V fallback and no second cache.
 
+## Scheduler wiring decision
+
+Production wiring remains disabled for M3b. The current lifecycle does not provide a
+safe draft-before-verify insertion point:
+
+- `scheduler.Scheduler._forward()` unpacks one `ForwardInput`, calls
+  `engine.forward_batch(batch, sample_args)` once, writes `next_tokens_gpu` into the
+  shared `token_pool`, and immediately calls `decode_manager.filter_reqs()`.
+- `Engine.forward_batch()` runs the target model forward that creates
+  `batch.mtp_hidden_state`; the hidden state is therefore only available *after* the
+  target forward. Calling `draft_into_batch()` from `_forward()` after that point
+  would be draft-after-target, not draft-before-verify.
+- `overlap_loop()` and `normal_loop()` drain a whole `ForwardData` through
+  `_process_last_data()`; that drain handles EOS, aborts, prefix caching, and resource
+  release for every request in the batch. It has no per-request transaction or
+  rollback/commit seam.
+- The scheduler batches requests, whereas `TargetKvProvider` deliberately requires
+  one prepared request page-table row and its positions. Choosing one row or creating
+  another cache owner would be incorrect.
+
+Consequently, constructing `GemmaMTPDrafter` from the flag alone would either use
+missing checkpoint/mapping inputs or change cache and token ownership semantics. A
+future hook needs an explicit single-request transaction boundary, a second target
+verification forward, and scheduler-owned commit/abort handling before it can call
+`run_k1_transaction`. The flag remains parsed and model hidden-state export remains
+opt-in, but it does not alter the production scheduler.
+
 ## Required bench validation checklist
 
 1. Real-file load: load a real Gemma MTP file through `GemmaMTPDrafter.from_gguf`

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from freetoken.models.gemma4 import (
+    Gemma4ForCausalLM,
     GemmaMTPDrafter,
     TargetKvProvider,
     GemmaMTPGGUFMetadata,
@@ -71,6 +72,35 @@ def test_real_gemma_mtp_checkpoint_shape_probe_skips_when_absent():
     assert tuple(drafter.pre_projection.shape) == (1024, 5632)
     assert tuple(drafter.post_projection.shape) == (2816, 1024)
     assert tuple(drafter.embedding.shape) == (262144, 1024)
+
+
+def test_hidden_state_export_is_opt_in_without_changing_logits(monkeypatch):
+    from types import SimpleNamespace
+    import freetoken.models.gemma4.model as gemma_model
+
+    batch = SimpleNamespace(input_ids=torch.tensor([[1, 2]]))
+    hidden = torch.tensor([[1.0, 2.0]])
+    logits = torch.tensor([[3.0, 4.0]])
+    target = Gemma4ForCausalLM.__new__(Gemma4ForCausalLM)
+    target.model = SimpleNamespace(forward=lambda _: hidden)
+    target.lm_head = SimpleNamespace(forward=lambda value: logits)
+    target._final_logit_softcapping = None
+    monkeypatch.setattr(gemma_model, "get_global_ctx", lambda: SimpleNamespace(batch=batch))
+
+    target.enable_speculative_mtp(False)
+    ordinary = target.forward()
+    assert torch.equal(ordinary, logits)
+    assert getattr(batch, "mtp_hidden_state", None) is None
+
+    target.enable_speculative_mtp(True)
+    exported = target.forward()
+    assert torch.equal(exported, ordinary)
+    assert torch.equal(target.mtp_hidden_state, hidden)
+    assert torch.equal(batch.mtp_hidden_state, hidden)
+
+    target.enable_speculative_mtp(False)
+    target.forward()
+    assert getattr(batch, "mtp_hidden_state", None) is None
 
 
 def test_target_kv_provider_uses_shared_mapping_and_paged_rows():

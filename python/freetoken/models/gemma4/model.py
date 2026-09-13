@@ -147,6 +147,10 @@ class Gemma4ForCausalLM(BaseLLMModel):
         if self._speculative_mtp:
             self.mtp_hidden_state = None
             batch.mtp_hidden_state = None
+        else:
+            # Do not leave an export from a previous opt-in forward attached to a reused batch.
+            if hasattr(batch, "mtp_hidden_state"):
+                batch.mtp_hidden_state = None
         output = self.model.forward(batch.input_ids)
         if self._speculative_mtp:
             # Keep the normal tensor return convention; the opt-in adapter reads this
