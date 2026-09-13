@@ -96,3 +96,18 @@ Validation evidence (Phase C current task, 2026-09-12):
 - Consequently, OFF/ON exactness and 256-token generation were not run. This is
   a diagnosed infrastructure/build blocker, not a production failure; production
   was untouched and the STOP file was absent.
+
+Validation evidence (latest Phase C smoke run):
+
+- Candidate `e10e4d6` was tested on ASTRALPLANE with the real drafter present. The
+  loader previously passed the 49-tensor inventory, shape, and metadata gates.
+- The server was launched on the candidate with `--speculative-mtp`,
+  `--gemma-mtp-layer-mapping 26,27,28,29`, `--moe-strategy hybrid`, and
+  `--moe-cache-rate 0.30` on port `18080`. `/v1/models` became ready, but
+  completion requests returned `503 model still loading`.
+- During loading, the backend scheduler worker exited and the API shut down. The
+  observed behavior is consistent with a likely resource/load failure during
+  backend initialization, but no traceback was captured and the precise cause is
+  not established here.
+- OFF/ON exactness and 256-token generation were not achieved. Production was
+  untouched.
