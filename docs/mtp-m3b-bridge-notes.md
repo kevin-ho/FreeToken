@@ -80,3 +80,19 @@ Validation evidence (Phase C attempt, 2026-09-12):
   removing the automatic `(26,27,28,29)` mapping default.
 - Local checks: `python3 -m compileall -q python/freetoken` passed and `git diff --check`
   passed. Focused pytest was not run locally because pytest is unavailable.
+
+Validation evidence (Phase C current task, 2026-09-12):
+
+- The candidate was synced to `origin/mtp/m3b-bridge` at `e10e4d6`.
+- On ASTRALPLANE, the real drafter loaded successfully via
+  `GemmaMTPDrafter.from_gguf` against
+  `/home/kho/models/mtp-drafters/mtp-gemma-4-26B-A4B-it.gguf`. The 49-tensor
+  inventory, shape, and metadata gates passed; the Python probe confirmed
+  `LOAD_OK` and object construction.
+- `setup.py build_ext` was attempted but first failed because CUDA 12.9 did not
+  match torch CUDA 13.0. Retrying with `FREETOKEN_ALLOW_CUDA_MISMATCH=1` failed
+  while copying an extension because the candidate checkout lacks
+  `freetoken/kernel` as an output directory. The build did not succeed.
+- Consequently, OFF/ON exactness and 256-token generation were not run. This is
+  a diagnosed infrastructure/build blocker, not a production failure; production
+  was untouched and the STOP file was absent.
