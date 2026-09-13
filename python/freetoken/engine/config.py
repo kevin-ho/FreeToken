@@ -87,8 +87,9 @@ class EngineConfig:
     # KV capacity in tokens; resolved into num_page_override by _adjust_config once page_size
     # is final. Mutually exclusive with num_page_override.
     num_token_override: int | None = None
-    # MTP remains opt-in until a checkpoint-specific drafter is supplied.
+    # MTP remains opt-in until a checkpoint-specific drafter and KV mapping are supplied.
     speculative_mtp: bool = False
+    gemma_mtp_layer_mapping: tuple[int, ...] | None = None
 
     def __post_init__(self):
         if self.moe_backend is None:

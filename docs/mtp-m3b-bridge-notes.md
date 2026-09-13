@@ -19,20 +19,23 @@ mapping is missing.
   complete bridge and calls `run_k1_transaction`; otherwise it uses the ordinary
   `Engine.forward_batch()` path. The scheduler remains the page/cache owner.
 - `python/freetoken/models/gemma4/mtp.py`: the provider performs no allocation or
-  writes. The explicit default mapping is assistant layers `(0, 1, 2, 3)` to target
-  layers `(0, 1, 2, 3)`.
+  writes. It requires an explicit assistant-to-target KV mapping; no default mapping
+  is enabled because the inspected llama.cpp sources do not establish one.
 
-The mapping is not inferred from checkpoint names. It follows the Gemma assistant
-implementation's corresponding block construction and target shared-KV selection in
-llama.cpp, stable commit
+The mapping is not inferred from checkpoint names. The inspected Gemma assistant
+block construction and target shared-KV selection in llama.cpp do not establish
+assistant-to-target layer correspondence. The bridge therefore requires a separately
+validated explicit mapping rather than silently using block numbers. The relevant stable
+commit is
 [`73159c30399a77144f59d37fde504dfd00afbea5`](https://github.com/ggml-org/llama.cpp/commit/73159c30399a77144f59d37fde504dfd00afbea5):
 `src/models/gemma4-assistant.cpp` lines 84-127 and 185-200, and
 `src/models/gemma4.cpp` lines 232-273. If a future checkpoint proves a different
 relationship, it must provide a new explicit mapping rather than changing this
-fallback silently.
+requirement silently.
 
-Verification calls the ordinary target `forward_batch()` once and retains its normal
-`ForwardOutput` on the prepared batch for commit. Commit is deliberately idempotent;
+Preparation performs the ordinary target `forward_batch()` exactly once, after page-table
+and embedding setup, so Gemma can export the hidden state needed by the drafter. Verification
+only reuses that output and does not call the target a second time. Commit is deliberately idempotent;
 abort is also idempotent and does not free pages. Final request draining and resource
 release remain in the scheduler's existing lifecycle.
 

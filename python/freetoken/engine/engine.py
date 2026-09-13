@@ -457,7 +457,7 @@ class Engine:
             self.mtp_drafter = None
             return
 
-        def prepare(batch: Batch) -> bool:
+        def prepare(batch: Batch, args) -> bool:
             if len(batch.reqs) != 1 or not hasattr(batch, "positions"):
                 return False
             req = batch.reqs[0]
@@ -466,28 +466,32 @@ class Engine:
                 return False
             try:
                 row = self.page_table[req.table_idx]
-                # Gemma assistant blocks reuse the corresponding target blocks. This
-                # is the four-block layout in llama.cpp's Gemma assistant graph:
-                # src/models/gemma4-assistant.cpp@73159c3 (graph construction), with
-                # target shared-KV selection in src/models/gemma4.cpp@73159c3.
-                batch.kv_provider = TargetKvProvider(
-                    self.kv_cache, row, positions, (0, 1, 2, 3)
-                )
-                hidden = getattr(batch, "mtp_hidden_state", None)
-                batch.hidden_state = hidden[-1:] if hidden is not None else None
+                mapping = getattr(config, "gemma_mtp_layer_mapping", None)
+                if mapping is None:
+                    # The public llama.cpp sources do not define assistant-layer to
+                    # target-layer correspondence. Do not infer it from block numbers.
+                    return False
+                batch.kv_provider = TargetKvProvider(self.kv_cache, row, positions, mapping)
                 batch.target_lm_head = self.model.lm_head
                 embedding = self.model.model.embed_tokens
                 batch.last_embedding = embedding.forward(batch.input_ids[-1:].reshape(-1))
             except (AttributeError, IndexError, RuntimeError, ValueError):
                 return False
-            return batch.hidden_state is not None
+
+            # Gemma exports the hidden state as a side effect of the target forward.
+            # This is the one ordinary target forward for both MTP verification and the
+            # scheduler's normal drain; verification must not call forward_batch again.
+            output = self.forward_batch(batch, args)
+            batch.mtp_forward_output = output
+            hidden = getattr(batch, "mtp_hidden_state", None)
+            if hidden is None:
+                return False
+            batch.hidden_state = hidden[-1:]
+            batch.mtp_verify_output = output
+            return True
 
         def verify(batch: Batch, args):
-            # Exactly one ordinary target forward supplies both target prediction and
-            # the ForwardOutput retained for the normal scheduler drain.
-            output = self.forward_batch(batch, args)
-            batch.mtp_verify_output = output
-            return output.next_tokens_gpu
+            return batch.mtp_verify_output.next_tokens_gpu
 
         def commit(batch: Batch, result):
             if getattr(batch, "mtp_forward_output", None) is not None:

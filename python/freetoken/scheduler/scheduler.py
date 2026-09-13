@@ -885,9 +885,13 @@ class Scheduler(SchedulerIOMixin):
             or not callable(verify)
             or not callable(commit)
             or not callable(abort)
-            or not prepare(batch)
         ):
             return None
+        if not prepare(batch, sample_args):
+            # Preparation may have run the single ordinary target forward before
+            # discovering that the model did not export the MTP hidden state. Reuse
+            # that output rather than falling through to a second target forward.
+            return getattr(batch, "mtp_forward_output", None)
 
         run_k1_transaction(
             batch,
