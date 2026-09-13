@@ -34,18 +34,30 @@ configuration, nor does it establish that every real assistant checkpoint can
 reuse target rows. The provider therefore requires an explicit mapping and is
 not wired automatically. There is no fake K/V fallback and no second cache.
 
-## Scheduler wiring decision
+## Scheduler wiring
 
-Production wiring remains disabled for M3b. The current lifecycle does not provide a
-safe draft-before-verify insertion point:
+The flag-gated scheduler hook is now present for the smallest supported transaction. After
+ordinary batch preparation (including page allocation and page-table setup), it is eligible
+only for one request and only when the engine supplies a loaded drafter plus verify, commit,
+and abort callbacks. It calls `run_k1_transaction`, so draft precedes target verification and
+commit remains engine/scheduler-owned. The commit callback must attach the normal
+`ForwardOutput`; otherwise the hook fails closed and the ordinary forward runs.
 
-- `scheduler.Scheduler._forward()` unpacks one `ForwardInput`, calls
-  `engine.forward_batch(batch, sample_args)` once, writes `next_tokens_gpu` into the
-  shared `token_pool`, and immediately calls `decode_manager.filter_reqs()`.
-- `Engine.forward_batch()` runs the target model forward that creates
-  `batch.mtp_hidden_state`; the hidden state is therefore only available *after* the
-  target forward. Calling `draft_into_batch()` from `_forward()` after that point
-  would be draft-after-target, not draft-before-verify.
+The hook populates the adapter's hidden state, target LM head, target embedding, and prepared
+positions from real model/batch objects when available. Missing Gemma inputs leave the default
+path unchanged. It does not allocate pages, create a cache owner, add rollback, support k>1,
+or implement sampling.
+
+The remaining lifecycle constraints are:
+
+- `scheduler.Scheduler._forward()` unpacks one `ForwardInput`, runs the opt-in hook when
+  its complete callback contract is present, otherwise calls `engine.forward_batch()` once,
+  then writes `next_tokens_gpu` into the shared `token_pool` and calls
+  `decode_manager.filter_reqs()`.
+- The normal `Engine.forward_batch()` target forward creates `batch.mtp_hidden_state`; the
+  hook therefore requires the engine to supply a usable hidden state before draft time (or
+  it fails closed). The production callback bridge is responsible for the target verification
+  forward and for attaching the resulting normal `ForwardOutput` at commit.
 - `overlap_loop()` and `normal_loop()` drain a whole `ForwardData` through
   `_process_last_data()`; that drain handles EOS, aborts, prefix caching, and resource
   release for every request in the batch. It has no per-request transaction or
@@ -54,12 +66,10 @@ safe draft-before-verify insertion point:
   one prepared request page-table row and its positions. Choosing one row or creating
   another cache owner would be incorrect.
 
-Consequently, constructing `GemmaMTPDrafter` from the flag alone would either use
-missing checkpoint/mapping inputs or change cache and token ownership semantics. A
-future hook needs an explicit single-request transaction boundary, a second target
-verification forward, and scheduler-owned commit/abort handling before it can call
-`run_k1_transaction`. The flag remains parsed and model hidden-state export remains
-opt-in, but it does not alter the production scheduler.
+The hook still does not construct `GemmaMTPDrafter` from the flag alone: missing
+checkpoint/mapping inputs fail closed. The callback bridge supplies the explicit
+single-request verification and scheduler-owned commit/abort handling; the flag remains
+parsed and model hidden-state export remains opt-in.
 
 ## Required bench validation checklist
 

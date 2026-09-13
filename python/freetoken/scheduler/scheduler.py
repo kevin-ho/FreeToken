@@ -26,6 +26,8 @@ from freetoken.utils import (
     load_toolcall_anchor_id,
 )
 
+from freetoken.engine.mtp import run_k1_transaction
+
 from .cache import CacheManager
 from .config import SchedulerConfig
 from .decode import DecodeManager
@@ -863,12 +865,66 @@ class Scheduler(SchedulerIOMixin):
         pending.clear()
         self.send_result([ErrorReplyMsg(uid=uid, error="request aborted") for uid in uids])
 
+    def _run_speculative_mtp(self, batch: Batch, sample_args: BatchSamplingArgs):
+        """Run the opt-in single-request MTP seam, or return ``None`` to fall back.
+
+        The engine supplies checkpoint-specific drafter, verifier, and commit callbacks when
+        it has all required Gemma inputs.  The scheduler still owns the prepared batch and its
+        page lifecycle; this hook does not allocate, rollback, or create a second cache owner.
+        """
+        if not self.config.speculative_mtp or len(batch.reqs) != 1:
+            return None
+        drafter = getattr(self.engine, "mtp_drafter", None)
+        verify = getattr(self.engine, "verify_mtp_batch", None)
+        commit = getattr(self.engine, "commit_mtp_batch", None)
+        if not hasattr(drafter, "draft_into_batch") or not callable(verify) or not callable(commit):
+            return None
+
+        # These are deliberately best-effort adapters for the real model objects.  A
+        # checkpoint-specific engine callback may provide stricter inputs instead.
+        model = getattr(self.engine, "model", None)
+        hidden = getattr(batch, "mtp_hidden_state", None)
+        if hidden is None:
+            hidden = getattr(model, "mtp_hidden_state", None)
+        if hidden is not None:
+            batch.hidden_state = hidden
+        if model is not None:
+            batch.target_lm_head = getattr(model, "lm_head", None)
+            target_model = getattr(model, "model", None)
+            embedding = getattr(target_model, "embed_tokens", None)
+            if embedding is not None and hasattr(batch, "input_ids"):
+                batch.last_embedding = embedding.forward(batch.input_ids[-1:].reshape(-1))
+        if not hasattr(batch, "positions"):
+            return None
+        if getattr(batch, "hidden_state", None) is None or getattr(batch, "target_lm_head", None) is None:
+            return None
+
+        run_k1_transaction(
+            batch,
+            drafter,
+            lambda prepared: verify(prepared, sample_args),
+            commit,
+            getattr(self.engine, "abort_mtp_batch", lambda _: None),
+        )
+        # Commit owns the normal sampled ForwardOutput.  Without it, fail closed rather than
+        # running a second target forward after the transaction has committed.
+        output = getattr(batch, "mtp_forward_output", None)
+        if output is None:
+            raise RuntimeError("MTP commit did not attach ForwardOutput")
+        return output
+
     def _forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch, sample_args, input_mapping, output_mapping = forward_input
         batch.input_ids = self.token_pool[input_mapping]
         if self.toolcall_anchor_id is not None and not batch.is_prefill:
             self.cache_manager.snapshot_toolcall_anchor(batch.reqs)
-        forward_output = self.engine.forward_batch(batch, sample_args)
+        forward_output = (
+            self._run_speculative_mtp(batch, sample_args)
+            if self.config.speculative_mtp
+            else None
+        )
+        if forward_output is None:
+            forward_output = self.engine.forward_batch(batch, sample_args)
         self.token_pool[output_mapping] = forward_output.next_tokens_gpu
         self.decode_manager.filter_reqs(forward_input.batch.reqs)
         return forward_output
