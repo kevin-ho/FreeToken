@@ -52,10 +52,25 @@ release remain in the scheduler's existing lifecycle.
 
 Validation evidence (Phase C attempt, 2026-09-12):
 
+- Candidate commit `26a70bf` was tested against the real file
+  `/home/kho/models/mtp-drafters/mtp-gemma-4-26B-A4B-it.gguf` (251939328 bytes) with:
+  ```bash
+  FREETOKEN_TEST_MTP_GGUF=/home/kho/models/mtp-drafters/mtp-gemma-4-26B-A4B-it.gguf python3 - <<'PY'
+  import os
+  from freetoken.models.gemma4 import GemmaMTPDrafter
+
+  GemmaMTPDrafter.from_gguf(os.environ["FREETOKEN_TEST_MTP_GGUF"])
+  PY
+  ```
+  `GemmaMTPDrafter.from_gguf` reached inventory validation and failed because the
+  real GGUF contains `blk.0..3.*` tensor names while the frozen loader expects
+  `nextn.blk.0..3.*`: the inventory has missing/extra entries (inventory drift).
+  Drafter construction therefore failed, so no smoke was run. This provides no
+  exactness or generation evidence.
+
 - From this session, SSH to ASTRALPLANE did not complete: attempts returned `connection
   reset by peer` and then `timed out during banner exchange`. Consequently no candidate
-  command was run, no candidate checkout was synced or rebuilt, and production was not
-  touched.
+  checkout was synced or rebuilt from this session, and production was not touched.
 - The user-provided host evidence is recorded as the authoritative file fact:
   `/home/kho/models/mtp-drafters/mtp-gemma-4-26B-A4B-it.gguf` exists on ASTRALPLANE and
   is 251939328 bytes; it was not reachable from this session, so there is no claimed
