@@ -15,7 +15,6 @@ from freetoken.layers import set_rope_device
 from freetoken.layers.quantization import LayerKind, QuantBackend, finalize_quant, set_quant_backend
 from freetoken.moe.offload_cache import iter_offload_moe_layers
 from freetoken.models import create_model, load_weight
-from freetoken.models.gemma4 import GemmaMTPDrafter, TargetKvProvider
 from freetoken.models.gguf.reader import is_gguf_path
 from freetoken.moe import is_offload_moe_strategy
 from freetoken.moe.expert_banks import load_expert_banks
@@ -447,6 +446,10 @@ class Engine:
         """Install the opt-in Gemma bridge only for a validated MTP GGUF."""
         if not config.speculative_mtp or not is_gguf_path(config.model_path):
             return
+        # Imported here, not at module level: models.gemma4 transitively imports
+        # engine modules, and a top-level import makes server startup depend on
+        # import order (circular ImportError caught on the box, 2026-09-12).
+        from freetoken.models.gemma4 import GemmaMTPDrafter
         try:
             self.mtp_drafter = GemmaMTPDrafter.from_gguf(
                 config.model_path, target_lm_head=self.model.lm_head, device=self.device
@@ -471,6 +474,10 @@ class Engine:
                     # The public llama.cpp sources do not define assistant-layer to
                     # target-layer correspondence. Do not infer it from block numbers.
                     return False
+                # Imported here, not at module level: models.gemma4 transitively
+                # imports engine modules; top-level import broke server startup
+                # (circular ImportError caught on the box, 2026-09-12).
+                from freetoken.models.gemma4 import TargetKvProvider
                 batch.kv_provider = TargetKvProvider(self.kv_cache, row, positions, mapping)
                 batch.target_lm_head = self.model.lm_head
                 embedding = self.model.model.embed_tokens
