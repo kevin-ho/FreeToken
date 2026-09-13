@@ -15,6 +15,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Gemma-4 26B/A4B has four shared target-KV layers at the end of its 30-layer
+# backbone. This is the source-grounded default for the checkpoint supported by
+# the M3b bridge; other checkpoints must pass their own explicit mapping.
+GEMMA_MTP_DEFAULT_LAYER_MAPPING = (26, 27, 28, 29)
+
 
 @dataclass(frozen=True)
 class EngineConfig:
@@ -89,7 +94,7 @@ class EngineConfig:
     num_token_override: int | None = None
     # MTP remains opt-in until a checkpoint-specific drafter and KV mapping are supplied.
     speculative_mtp: bool = False
-    gemma_mtp_layer_mapping: tuple[int, ...] | None = None
+    gemma_mtp_layer_mapping: tuple[int, ...] | None = GEMMA_MTP_DEFAULT_LAYER_MAPPING
 
     def __post_init__(self):
         if self.moe_backend is None:

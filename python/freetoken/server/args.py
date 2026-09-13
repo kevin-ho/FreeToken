@@ -143,6 +143,15 @@ def parse_args(
             raise argparse.ArgumentTypeError("must be >= 1")
         return n
 
+    def _gemma_mtp_layer_mapping(value: str) -> tuple[int, ...]:
+        try:
+            mapping = tuple(int(part) for part in value.split(","))
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError("must be comma-separated layer indices") from exc
+        if not mapping or any(layer < 0 for layer in mapping):
+            raise argparse.ArgumentTypeError("must contain non-negative layer indices")
+        return mapping
+
     def _lazy_gpu_arg(value: str) -> tuple[str, ...]:
         from freetoken.gpu_select import gpu_arg
 
@@ -301,6 +310,16 @@ def parse_args(
         action="store_true",
         default=ServerArgs.speculative_mtp,
         help="Enable the experimental single-token MTP transaction (requires a drafter adapter).",
+    )
+
+    parser.add_argument(
+        "--gemma-mtp-layer-mapping",
+        type=_gemma_mtp_layer_mapping,
+        default=ServerArgs.gemma_mtp_layer_mapping,
+        help=(
+            "Assistant-to-target KV layer mapping, comma-separated. Defaults to the "
+            "source-grounded four trailing Gemma-4 target layers."
+        ),
     )
 
     parser.add_argument(
