@@ -127,15 +127,14 @@ class GemmaMTPDrafter:
     @classmethod
     def from_gguf(cls, model_path: str, *, target_lm_head=None, device=None, kv_provider=None):
         self = cls(kv_provider=kv_provider)
-        # Real drafter layout: projections under nextn.*, blocks at the ROOT
-        # (blk.{0-3}.*) per the frozen 49-tensor inventory.
+        # Real drafter layout (frozen probe): blocks at ROOT as blk.{0-3}.*;
+        # only nextn.pre_projection / nextn.post_projection carry the nextn. prefix.
+        # One flat full-name map serves both lookups.
         weights = _tensor_map(model_path, "")
         root_weights = weights
-        self.pre_projection = _get(weights, "pre_projection.weight")
-        self.post_projection = _get(weights, "post_projection.weight")
+        self.pre_projection = _get(weights, "nextn.pre_projection.weight")
+        self.post_projection = _get(weights, "nextn.post_projection.weight")
         self.output_norm = _get(root_weights, "output_norm.weight")
-        # The drafter table follows the GGUF convention and is named at the root;
-        # nextn.* owns the projections and blocks.
         self.embedding = _get(root_weights, "token_embd.weight")
         self.rope_freqs = root_weights.get("rope_freqs.weight")
         from freetoken.models.gguf.reader import load_gguf_metadata
