@@ -64,9 +64,9 @@ class Gemma4MLP(BaseOP):
 
         topk_weights, topk_ids = self.router.forward(x)
         routed_in = self.pre_feedforward_layernorm_2.forward(x)
-        # routed_forward may mutate the ids in place (offload decode slot remap);
-        # keep the router's output intact.
-        routed = self.experts.routed_forward(routed_in, topk_weights, topk_ids.clone())
+        # routed_forward may mutate the ids in place for offload decode slot remap;
+        # this local router result has no later consumer, so avoid a decode-time clone.
+        routed = self.experts.routed_forward(routed_in, topk_weights, topk_ids)
 
         return gemma_dual_rmsnorm_residual_scalar(
             shared,

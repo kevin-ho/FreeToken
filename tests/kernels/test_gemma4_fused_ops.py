@@ -121,3 +121,42 @@ def test_gemma4_router_uses_sgl_kernel_topk_softmax_semantics():
 
     torch.testing.assert_close(ids, ref_ids.to(torch.int32))
     torch.testing.assert_close(weights, ref_weights, rtol=2e-4, atol=2e-4)
+
+
+def test_gemma4_mlp_passes_router_ids_without_decode_clone(monkeypatch):
+    from freetoken.models.gemma4.moe import Gemma4MLP
+
+    class FakeShared:
+        def forward(self, value):
+            return value
+
+    class FakeNorm:
+        def forward(self, value):
+            return value
+
+    class FakeRouter:
+        def forward(self, value):
+            return torch.ones((1, 2), device=value.device), ids
+
+    class FakeExperts:
+        def routed_forward(self, hidden, weights, received_ids):
+            assert received_ids is ids
+            return hidden
+
+    ids = torch.tensor([[2, 1]], device="cuda", dtype=torch.int32)
+    mlp = Gemma4MLP.__new__(Gemma4MLP)
+    mlp.shared_mlp = FakeShared()
+    mlp.router = FakeRouter()
+    mlp.experts = FakeExperts()
+    mlp.pre_feedforward_layernorm_2 = FakeNorm()
+    mlp.post_feedforward_layernorm_1 = FakeNorm()
+    mlp.post_feedforward_layernorm_2 = FakeNorm()
+    mlp.post_feedforward_layernorm = FakeNorm()
+    mlp.layer_scalar = torch.ones(1, device="cuda")
+
+    monkeypatch.setattr(
+        "freetoken.models.gemma4.moe.gemma_dual_rmsnorm_residual_scalar",
+        lambda shared, *args: shared,
+    )
+    x = torch.randn((1, 8), device="cuda", dtype=torch.bfloat16)
+    assert mlp.forward(x, x) is x
