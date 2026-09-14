@@ -446,13 +446,21 @@ class Engine:
         """Install the opt-in Gemma bridge only for a validated MTP GGUF."""
         if not config.speculative_mtp or not is_gguf_path(config.model_path):
             return
+        # The drafter weights live in a SEPARATE nextn GGUF (the target's google
+        # GGUF has no MTP heads). Locate it via FREETOKEN_MTP_DRAFTER; without
+        # it, MTP stays off (fail closed) rather than scanning the 14 GB target.
+        import os
+
+        drafter_path = os.environ.get("FREETOKEN_MTP_DRAFTER", "")
+        if not drafter_path or not is_gguf_path(drafter_path):
+            return
         # Imported here, not at module level: models.gemma4 transitively imports
         # engine modules, and a top-level import makes server startup depend on
         # import order (circular ImportError caught on the box, 2026-09-12).
         from freetoken.models.gemma4 import GemmaMTPDrafter
         try:
             self.mtp_drafter = GemmaMTPDrafter.from_gguf(
-                config.model_path, target_lm_head=self.model.lm_head, device=self.device
+                drafter_path, target_lm_head=self.model.lm_head, device=self.device
             )
         except Exception:  # noqa: BLE001 - speculative setup must fail closed
             # MTP is an optional acceleration path; an incomplete inventory must not
