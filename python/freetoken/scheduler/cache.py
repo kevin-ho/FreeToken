@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Tuple
 
 import torch
@@ -27,6 +28,82 @@ _SWA_EVICTION_INTERVAL = _swa_eviction_interval()
 # prompt end. The gap covers templates whose generation prompt injects tokens that vanish when
 # the client drops reasoning (Qwen's "<think>\n": the re-render diverges 2 tokens BEFORE P).
 _SWA_RETAIN_GAP = 16
+
+
+@dataclass
+class SpeculativeReservation:
+    """An exclusive, page-backed reservation for one request.
+
+    This is intentionally below the model/forwarding layer. It does not publish tokens to a
+    prefix cache, and it does not snapshot recurrent state; hybrid managers are therefore
+    rejected by ``CacheManager.reserve_speculative`` for now.
+    """
+
+    cache: "CacheManager"
+    req: Req
+    base_cached_len: int
+    base_device_len: int
+    base_output_len: int
+    base_max_device_len: int
+    base_row: torch.Tensor
+    allocated_pages: torch.Tensor
+    reserved_tokens: int
+    committed_tokens: int = 0
+    _closed: bool = False
+
+    @property
+    def committed_end(self) -> int:
+        return self.base_device_len + self.committed_tokens
+
+    def commit_prefix(self, n: int) -> None:
+        """Keep the first ``n`` reserved positions and make them cached request state."""
+        if self._closed:
+            raise RuntimeError("speculative reservation is already closed")
+        if not 0 <= n <= self.reserved_tokens:
+            raise ValueError(f"committed prefix {n} is outside 0..{self.reserved_tokens}")
+        self.committed_tokens = n
+        # Keep one look-ahead position for the next ordinary decode step.
+        self.req.cached_len = self.committed_end
+        self.req.device_len = self.committed_end + 1
+
+    def rollback_suffix(self) -> None:
+        """Drop the uncommitted suffix, retaining only pages containing the committed prefix."""
+        if self._closed:
+            return
+        cache = self.cache
+        keep_page_count = div_ceil(self.committed_end, cache.page_size)
+        base_page = div_ceil(self.base_device_len, cache.page_size)
+        keep_allocated = max(0, keep_page_count - base_page)
+        if keep_allocated < len(self.allocated_pages):
+            dropped = self.allocated_pages[keep_allocated:]
+            if cache.swa_paged:
+                cache._free_swa(cache._page_to_token(dropped))
+            cache._free(dropped)
+        current = cache.page_table[self.req.table_idx].clone()
+        cache.page_table[self.req.table_idx].copy_(self.base_row)
+        if self.committed_end > self.base_device_len:
+            cache.page_table[self.req.table_idx, self.base_device_len:self.committed_end].copy_(
+                current[self.base_device_len:self.committed_end])
+        self.req.cached_len = self.committed_end
+        self.req.device_len = self.committed_end + 1
+        self.reserved_tokens = self.committed_tokens
+        self.allocated_pages = self.allocated_pages[:keep_allocated]
+
+    def abort(self) -> None:
+        """Return every speculative allocation and restore the request and page-table row."""
+        if self._closed:
+            return
+        cache = self.cache
+        if len(self.allocated_pages):
+            if cache.swa_paged:
+                cache._free_swa(cache._page_to_token(self.allocated_pages))
+            cache._free(self.allocated_pages)
+        cache.page_table[self.req.table_idx].copy_(self.base_row)
+        self.req.cached_len = self.base_cached_len
+        self.req.device_len = self.base_device_len
+        self.req.output_len = self.base_output_len
+        self.req.max_device_len = self.base_max_device_len
+        self._closed = True
 
 
 class CacheManager:
@@ -259,6 +336,54 @@ class CacheManager:
         0 sentinel, so safe to call on any slots being returned to free_slots."""
         if self.swa_pool is not None and len(indices) > 0:
             self.swa_pool.free_swa(indices)
+
+    def reserve_speculative(self, req: Req, num_tokens: int) -> SpeculativeReservation:
+        """Reserve exclusive KV pages for a future verification span.
+
+        The reservation is deliberately not prefix-cache-aware: it consumes only currently free
+        pages and never evicts or publishes shared entries. This makes abort ownership explicit.
+        Hybrid requests are not supported until their recurrent state can be snapshotted too.
+        """
+        if self.is_hybrid:
+            raise NotImplementedError("speculative reservations do not snapshot hybrid state")
+        if num_tokens <= 0:
+            raise ValueError("num_tokens must be positive")
+        if req.device_len + num_tokens > req.max_device_len:
+            raise ValueError("speculative reservation exceeds request output capacity")
+
+        base_row = self.page_table[req.table_idx].clone()
+        base_cached_len = req.cached_len
+        base_device_len = req.device_len
+        needed_pages = max(
+            0,
+            div_ceil(base_device_len + num_tokens, self.page_size)
+            - div_ceil(base_device_len, self.page_size),
+        )
+        if needed_pages > len(self.free_slots):
+            raise RuntimeError("insufficient free pages for speculative reservation")
+        allocated_pages = self.free_slots[:needed_pages].clone()
+        if needed_pages:
+            # Do not use _allocate: it is allowed to evict shared cache entries, which an abort
+            # cannot restore. SWA slots are similarly owned by this reservation only.
+            self.free_slots = self.free_slots[needed_pages:]
+            allocated = self._page_to_token(allocated_pages)
+            if self.swa_paged:
+                if self.swa_available_size < len(allocated):
+                    self.free_slots = torch.cat([self.free_slots, allocated_pages])
+                    raise RuntimeError("insufficient SWA slots for speculative reservation")
+                self.swa_pool.alloc_swa(allocated)
+            _write_page_table(
+                self.page_table,
+                allocated,
+                [(req.table_idx, div_ceil(base_device_len, self.page_size),
+                  div_ceil(base_device_len + num_tokens, self.page_size))],
+                self.page_size,
+            )
+        req.device_len = base_device_len + num_tokens
+        return SpeculativeReservation(
+            self, req, base_cached_len, base_device_len, req.output_len, req.max_device_len,
+            base_row, allocated_pages, num_tokens,
+        )
 
     def allocate_paged(self, reqs: List[Req]) -> None:
         needed_pages = 0
